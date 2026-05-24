@@ -43,3 +43,17 @@ def test_lumber_supply_dependency_is_explicit():
     ]
     assert supply_edges
     assert all(edge.load_bearing for edge in supply_edges)
+
+
+
+def test_generated_world_places_battlefield_and_ruin():
+    world = generate_world(seed=12345, size=128)
+
+    battlefields = [entity for entity in world.entities.values() if entity.type == EntityType.BATTLEFIELD]
+    ruins = [entity for entity in world.entities.values() if entity.type == EntityType.RUIN]
+
+    assert battlefields
+    assert ruins
+    for entity in battlefields + ruins:
+        assert entity.root_provenance_id in world.provenance.nodes
+        assert world.provenance.load_bearing_parent_count(entity.root_provenance_id) >= 2

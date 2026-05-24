@@ -91,7 +91,11 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
         next_entity_id += 1
 
     if roads:
-        _create_fort(world, entity_id=next_entity_id, roads=roads)
+        fort = _create_fort(world, entity_id=next_entity_id, roads=roads)
+        next_entity_id += 1
+        _create_battlefield(world, entity_id=next_entity_id, roads=roads, fort=fort)
+        next_entity_id += 1
+        _create_ruin(world, entity_id=next_entity_id, settlement_candidates=settlement_candidates)
 
 
 def find_settlement_candidates(world: World) -> list[SettlementCandidate]:
@@ -442,6 +446,118 @@ def _fort_coord_score(world: World, road: Entity, index: int, midpoint_index: in
     midpoint_bias = 1.0 - abs(index - midpoint_index) / max(1, midpoint_index)
     terrain_score = tile.slope * 0.45 + tile.elevation * 0.25 + (1.0 - tile.water_flow) * 0.10
     return terrain_score + distance_score * 0.35 + midpoint_bias * 0.20
+
+
+def _create_battlefield(world: World, *, entity_id: int, roads: list[Entity], fort: Entity) -> Entity:
+    road = max(
+        roads,
+        key=lambda candidate: (
+            len(candidate.coordinates),
+            world.provenance.nodes[candidate.root_provenance_id].payload.get("route_weight", 0.0),
+        ),
+    )
+    road_node = world.provenance.nodes[road.root_provenance_id]
+    coord = _battlefield_coord(road, fort.coordinates[0])
+    tile = world.baseline[coord]
+    conflict_score = min(
+        1.0,
+        len(road.coordinates) / max(8.0, world.size / 2) + float(road_node.payload.get("route_weight", 0.0)),
+    )
+
+    route_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"contested transit corridor on {road.name}",
+        payload={"coord": coord, "road_entity": road.id, "route_weight": road_node.payload.get("route_weight", 0.0)},
+    )
+    conflict_node = world.provenance.add_node(
+        NodeType.HISTORICAL_EVENT,
+        f"route conflict around {fort.name}",
+        payload={"fort_entity": fort.id, "road_entity": road.id, "conflict_score": conflict_score},
+    )
+    battlefield_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Battlefield_{entity_id:02d} records route conflict",
+        entity_id=entity_id,
+        payload={"coord": coord, "road_entity": road.id, "fort_entity": fort.id, "conflict_score": conflict_score},
+    )
+
+    world.provenance.add_edge(road.root_provenance_id, battlefield_node.id, EdgeType.ENABLES, weight=conflict_score)
+    world.provenance.add_edge(route_node.id, battlefield_node.id, EdgeType.LOCATES, weight=max(0.1, 0.3 + tile.slope))
+    world.provenance.add_edge(conflict_node.id, battlefield_node.id, EdgeType.CAUSES, weight=max(0.1, conflict_score))
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.BATTLEFIELD,
+        subtype="RouteConflict",
+        name=f"Battlefield_{entity_id:02d}",
+        coordinates=[coord],
+        state=EntityState(integrity=0.7, wealth=0.0, function=0.2, active=True, status_label="Stable"),
+        root_provenance_id=battlefield_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+
+def _create_ruin(world: World, *, entity_id: int, settlement_candidates: list[SettlementCandidate]) -> Entity:
+    occupied = {entity.coordinates[0] for entity in world.entities.values() if entity.coordinates}
+    candidate = next(
+        (
+            option
+            for option in settlement_candidates
+            if option.coord not in occupied and isolation_score(world, option.coord) >= 0.45
+        ),
+        None,
+    )
+    if candidate is None:
+        candidate = next(option for option in settlement_candidates if option.coord not in occupied)
+
+    tile = world.baseline[candidate.coord]
+    abandonment_pressure = max(0.1, isolation_score(world, candidate.coord) + (1.0 - candidate.reasons["fertility"]) * 0.35)
+    terrain_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"marginal terrain at ruined site {candidate.coord}",
+        payload={"coord": candidate.coord, "elevation": tile.elevation, "water_flow": tile.water_flow, "fertility": tile.fertility},
+    )
+    collapse_node = world.provenance.add_node(
+        NodeType.HISTORICAL_EVENT,
+        f"abandonment of precursor settlement at {candidate.coord}",
+        payload={"coord": candidate.coord, "abandonment_pressure": abandonment_pressure, "prior_subtype": candidate.subtype},
+    )
+    ruin_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Ruin_{entity_id:02d} marks collapsed settlement remains",
+        entity_id=entity_id,
+        payload={"coord": candidate.coord, "abandonment_pressure": abandonment_pressure},
+    )
+
+    world.provenance.add_edge(terrain_node.id, ruin_node.id, EdgeType.LOCATES, weight=max(0.1, 1.0 - tile.fertility + tile.slope))
+    world.provenance.add_edge(collapse_node.id, ruin_node.id, EdgeType.CAUSES, weight=abandonment_pressure)
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.RUIN,
+        subtype="AbandonedSettlement",
+        name=f"Ruin_{entity_id:02d}",
+        coordinates=[candidate.coord],
+        state=EntityState(integrity=0.35, wealth=0.0, function=0.0, active=True, status_label="Stable"),
+        root_provenance_id=ruin_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+
+def _battlefield_coord(road: Entity, fort_coord: Coord) -> Coord:
+    if len(road.coordinates) <= 2:
+        return fort_coord
+    for coord in road.coordinates:
+        if coord != fort_coord:
+            return coord
+    return road.coordinates[0]
+
 
 
 def manhattan_path(start: Coord, end: Coord, *, size: int) -> list[Coord]:
