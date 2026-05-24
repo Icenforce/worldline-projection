@@ -1,4 +1,6 @@
 from worldline.generate import generate_world
+from worldline.models import EntityType
+from worldline.perturb import find_timber_dependency_pair
 from worldline.substrate import generate_substrate
 
 
@@ -29,14 +31,17 @@ def test_substrate_has_expected_size_and_ranges():
         assert 0.0 <= tile.coal <= 1.0
 
 
-def test_generated_world_uses_substrate_fields_for_demo_entities():
+def test_generated_world_uses_substrate_fields_for_generated_entities():
     world = generate_world(seed=12345, size=64)
-    settlement = world.entities[1]
-    lumber = world.entities[2]
+    settlement_id, lumber_id = find_timber_dependency_pair(world)
+    settlement = world.entities[settlement_id]
+    lumber = world.entities[lumber_id]
 
     settlement_tile = world.baseline[settlement.coordinates[0]]
     lumber_tile = world.baseline[lumber.coordinates[0]]
 
+    assert settlement.type == EntityType.SETTLEMENT
+    assert lumber.type == EntityType.LUMBER_CAMP
     assert settlement_tile.fertility > 0.35
     assert settlement_tile.elevation > -0.05
     assert lumber_tile.timber > 0.25
