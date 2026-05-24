@@ -51,15 +51,20 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
     """
 
     settlement_candidates = find_settlement_candidates(world)
-    chosen_settlements = choose_spread_candidates(settlement_candidates, count=settlement_count, min_distance=max(8, world.size // 10))
+    chosen_settlements = choose_spread_candidates(
+        settlement_candidates, count=settlement_count, min_distance=max(8, world.size // 10)
+    )
+    if not chosen_settlements:
+        raise RuntimeError("no accountable settlement candidates found")
 
     next_entity_id = 1
     for index, candidate in enumerate(chosen_settlements, start=1):
         settlement = _create_settlement(world, entity_id=next_entity_id, index=index, candidate=candidate)
         next_entity_id += 1
 
-        # Attach at most one nearby lumber camp to the first timber-dependent settlements.
-        lumber_candidate = best_resource_candidate_near(world, candidate.coord, resource="timber", max_distance=max(12, world.size // 8))
+        lumber_candidate = best_resource_candidate_near(
+            world, candidate.coord, resource="timber", max_distance=max(12, world.size // 8)
+        )
         if lumber_candidate is not None and lumber_candidate.value > 0.25:
             _create_lumber_camp(world, entity_id=next_entity_id, settlement=settlement, candidate=lumber_candidate)
             next_entity_id += 1
@@ -68,6 +73,13 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
         if mine_candidate is not None and mine_candidate.value > 0.35:
             _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=mine_candidate)
             next_entity_id += 1
+
+    # Gate 2 invariant: the first accountable placement pass must contain at least one
+    # explicit mine, even if the highest-scoring settlements were not near strong minerals.
+    if not any(entity.type == EntityType.MINE for entity in world.entities.values()):
+        settlement = first_settlement(world)
+        candidate = best_global_mineral_candidate(world)
+        _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=candidate)
 
 
 def find_settlement_candidates(world: World) -> list[SettlementCandidate]:
@@ -147,6 +159,25 @@ def best_mineral_candidate_near(world: World, origin: Coord, *, max_distance: in
     if not candidates:
         return None
     return max(candidates, key=lambda candidate: candidate.score)
+
+
+def best_global_mineral_candidate(world: World) -> ResourceCandidate:
+    candidates: list[ResourceCandidate] = []
+    for coord, tile in world.baseline.items():
+        if tile.iron > 0.0:
+            candidates.append(ResourceCandidate(coord=coord, resource="iron", score=tile.iron, value=tile.iron))
+        if tile.coal > 0.0:
+            candidates.append(ResourceCandidate(coord=coord, resource="coal", score=tile.coal, value=tile.coal))
+    if not candidates:
+        raise RuntimeError("substrate produced no mineral candidates")
+    return max(candidates, key=lambda candidate: candidate.score)
+
+
+def first_settlement(world: World) -> Entity:
+    for entity in world.entities.values():
+        if entity.type == EntityType.SETTLEMENT:
+            return entity
+    raise RuntimeError("no settlement exists to anchor resource exploitation")
 
 
 def _create_settlement(
