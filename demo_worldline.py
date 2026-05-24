@@ -9,7 +9,8 @@ from __future__ import annotations
 import argparse
 
 from worldline.generate import generate_world
-from worldline.perturb import compact_timber_collapse, inject_timber_destruction
+from worldline.models import EntityType
+from worldline.perturb import compact_timber_collapse, find_timber_dependency_pair, inject_timber_destruction
 from worldline.query import explain_entity
 from worldline.validate import run_validation
 
@@ -26,9 +27,13 @@ def main() -> None:
     print(f"seed={world.seed} size={world.size}")
     print()
 
+    settlements = [entity for entity in world.entities.values() if entity.type == EntityType.SETTLEMENT]
+    settlement_id, _ = find_timber_dependency_pair(world)
+
     print("BEFORE")
-    print(explain_entity(world, 1))
-    print()
+    for settlement in settlements[:5]:
+        print(explain_entity(world, settlement.id))
+        print()
 
     perturbation = inject_timber_destruction(world, magnitude=0.9, t=100)
     print("PERTURBATION")
@@ -36,13 +41,13 @@ def main() -> None:
     print()
 
     print("AFTER RESOLUTION")
-    print(explain_entity(world, 1))
+    print(explain_entity(world, settlement_id))
     print()
 
     archive_id = compact_timber_collapse(world, t=142)
     print("AFTER COMPACTION")
     print(f"archive_node={archive_id}")
-    print(explain_entity(world, 1))
+    print(explain_entity(world, settlement_id))
     print()
 
     print("VALIDATION")
