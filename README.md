@@ -75,4 +75,4 @@ python demo_worldline.py --seed 12345 --size 128
 pytest
 ```
 
-The current code is a skeleton. The immediate milestone is to make the timber-collapse proof scenario pass.
+The current prototype already covers the deterministic substrate, accountable placement for settlements/resources/roads/forts/ruins/battlefields, the timber-collapse perturbation path, and compaction retention checks. The next major milestone is the negative-control comparison required by the implementation contract.
