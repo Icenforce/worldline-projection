@@ -1,0 +1,272 @@
+"""Accountable entity placement for Worldline Projection.
+
+Gate 2 starts here: entities are no longer merely hand-wired into the world. They
+are selected from substrate-derived candidates and emit provenance as they are placed.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from worldline.models import (
+    EdgeType,
+    Entity,
+    EntityState,
+    EntityType,
+    NodeType,
+    SettlementSubtype,
+)
+from worldline.world import World
+
+Coord = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class SettlementCandidate:
+    coord: Coord
+    subtype: SettlementSubtype
+    score: float
+    reasons: dict[str, float]
+
+
+@dataclass(frozen=True)
+class ResourceCandidate:
+    coord: Coord
+    resource: str
+    score: float
+    value: float
+
+
+def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
+    """Place the first accountable entity set.
+
+    Current Gate 2 coverage:
+
+    - settlements
+    - lumber camps
+    - mines
+
+    Roads, forts, ruins, and battlefields are intentionally deferred to the next Gate 2
+    increment because they require route and history passes.
+    """
+
+    settlement_candidates = find_settlement_candidates(world)
+    chosen_settlements = choose_spread_candidates(settlement_candidates, count=settlement_count, min_distance=max(8, world.size // 10))
+
+    next_entity_id = 1
+    for index, candidate in enumerate(chosen_settlements, start=1):
+        settlement = _create_settlement(world, entity_id=next_entity_id, index=index, candidate=candidate)
+        next_entity_id += 1
+
+        # Attach at most one nearby lumber camp to the first timber-dependent settlements.
+        lumber_candidate = best_resource_candidate_near(world, candidate.coord, resource="timber", max_distance=max(12, world.size // 8))
+        if lumber_candidate is not None and lumber_candidate.value > 0.25:
+            _create_lumber_camp(world, entity_id=next_entity_id, settlement=settlement, candidate=lumber_candidate)
+            next_entity_id += 1
+
+        mine_candidate = best_mineral_candidate_near(world, candidate.coord, max_distance=max(18, world.size // 6))
+        if mine_candidate is not None and mine_candidate.value > 0.35:
+            _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=mine_candidate)
+            next_entity_id += 1
+
+
+def find_settlement_candidates(world: World) -> list[SettlementCandidate]:
+    candidates: list[SettlementCandidate] = []
+    for coord, tile in world.baseline.items():
+        if tile.elevation <= -0.05:
+            continue
+
+        agrarian_score = tile.fertility * 0.55 + tile.water_flow * 0.35 + (1.0 - tile.slope) * 0.10
+        mineral_score = max(tile.iron, tile.coal) * 0.55 + tile.water_flow * 0.20 + (1.0 - tile.slope) * 0.25
+        trade_score = tile.water_flow * 0.45 + tile.fertility * 0.25 + max(tile.iron, tile.coal, tile.timber) * 0.30
+        shrine_score = isolation_score(world, coord) * 0.55 + max(0.0, tile.elevation) * 0.25 + (1.0 - tile.fertility) * 0.20
+
+        scored = [
+            (agrarian_score, SettlementSubtype.AGRARIAN_VILLAGE),
+            (mineral_score, SettlementSubtype.MINING_CAMP),
+            (trade_score, SettlementSubtype.TRADE_TOWN),
+            (shrine_score, SettlementSubtype.ISOLATED_SHRINE_SETTLEMENT),
+        ]
+        score, subtype = max(scored, key=lambda item: item[0])
+        if score < 0.45:
+            continue
+        candidates.append(
+            SettlementCandidate(
+                coord=coord,
+                subtype=subtype,
+                score=score,
+                reasons={
+                    "fertility": tile.fertility,
+                    "water_flow": tile.water_flow,
+                    "timber": tile.timber,
+                    "iron": tile.iron,
+                    "coal": tile.coal,
+                    "slope": tile.slope,
+                    "elevation": tile.elevation,
+                },
+            )
+        )
+    candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+    return candidates
+
+
+def choose_spread_candidates(
+    candidates: list[SettlementCandidate], *, count: int, min_distance: int
+) -> list[SettlementCandidate]:
+    chosen: list[SettlementCandidate] = []
+    for candidate in candidates:
+        if all(manhattan(candidate.coord, existing.coord) >= min_distance for existing in chosen):
+            chosen.append(candidate)
+        if len(chosen) >= count:
+            break
+    return chosen
+
+
+def best_resource_candidate_near(
+    world: World, origin: Coord, *, resource: str, max_distance: int
+) -> ResourceCandidate | None:
+    candidates: list[ResourceCandidate] = []
+    for coord, tile in world.baseline.items():
+        distance = manhattan(origin, coord)
+        if distance > max_distance:
+            continue
+        value = getattr(tile, resource)
+        if value <= 0.0:
+            continue
+        score = value - distance * 0.012
+        candidates.append(ResourceCandidate(coord=coord, resource=resource, score=score, value=value))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate.score)
+
+
+def best_mineral_candidate_near(world: World, origin: Coord, *, max_distance: int) -> ResourceCandidate | None:
+    iron = best_resource_candidate_near(world, origin, resource="iron", max_distance=max_distance)
+    coal = best_resource_candidate_near(world, origin, resource="coal", max_distance=max_distance)
+    candidates = [candidate for candidate in [iron, coal] if candidate is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate.score)
+
+
+def _create_settlement(
+    world: World, *, entity_id: int, index: int, candidate: SettlementCandidate
+) -> Entity:
+    tile = world.baseline[candidate.coord]
+    water_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"water/fertility support for Settlement_{index:02d}",
+        payload={
+            "coord": candidate.coord,
+            "water_flow": tile.water_flow,
+            "fertility": tile.fertility,
+        },
+    )
+    subtype_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"subtype preconditions for {candidate.subtype}",
+        payload=candidate.reasons,
+    )
+    settlement_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Settlement_{index:02d} placed by accountable settlement scoring",
+        entity_id=entity_id,
+        payload={
+            "coord": candidate.coord,
+            "score": candidate.score,
+            "subtype": candidate.subtype,
+        },
+    )
+
+    world.provenance.add_edge(water_node.id, settlement_node.id, EdgeType.LOCATES, weight=tile.fertility)
+    world.provenance.add_edge(subtype_node.id, settlement_node.id, EdgeType.REQUIRES, weight=candidate.score)
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.SETTLEMENT,
+        subtype=candidate.subtype,
+        name=f"Settlement_{index:02d}",
+        coordinates=[candidate.coord],
+        state=EntityState(
+            integrity=1.0,
+            wealth=min(0.9, 0.35 + candidate.score * 0.45),
+            function=1.0,
+            active=True,
+            status_label="Stable",
+        ),
+        root_provenance_id=settlement_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+def _create_lumber_camp(
+    world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate
+) -> Entity:
+    timber_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"timber field exploited by LumberCamp_{entity_id:02d}",
+        payload={"coord": candidate.coord, "timber": candidate.value},
+    )
+    camp_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"LumberCamp_{entity_id:02d} placed near timber field",
+        entity_id=entity_id,
+        payload={"coord": candidate.coord, "score": candidate.score},
+    )
+    world.provenance.add_edge(timber_node.id, camp_node.id, EdgeType.ENABLES, weight=candidate.value)
+    world.provenance.add_edge(camp_node.id, settlement.root_provenance_id, EdgeType.SUPPLIES, weight=candidate.value)
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.LUMBER_CAMP,
+        subtype=None,
+        name=f"LumberCamp_{entity_id:02d}",
+        coordinates=[candidate.coord],
+        state=EntityState(integrity=1.0, wealth=0.5, function=max(0.1, candidate.value), active=True),
+        root_provenance_id=camp_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+def _create_mine(
+    world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate
+) -> Entity:
+    mineral_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"{candidate.resource} deposit exploited by Mine_{entity_id:02d}",
+        payload={"coord": candidate.coord, candidate.resource: candidate.value},
+    )
+    mine_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Mine_{entity_id:02d} placed on {candidate.resource} deposit",
+        entity_id=entity_id,
+        payload={"coord": candidate.coord, "resource": candidate.resource, "score": candidate.score},
+    )
+    world.provenance.add_edge(mineral_node.id, mine_node.id, EdgeType.ENABLES, weight=candidate.value)
+    world.provenance.add_edge(mine_node.id, settlement.root_provenance_id, EdgeType.SUPPLIES, weight=candidate.value)
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.MINE,
+        subtype=candidate.resource,
+        name=f"Mine_{entity_id:02d}",
+        coordinates=[candidate.coord],
+        state=EntityState(integrity=1.0, wealth=0.5, function=max(0.1, candidate.value), active=True),
+        root_provenance_id=mine_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+def isolation_score(world: World, coord: Coord) -> float:
+    tile = world.baseline[coord]
+    return max(0.0, min(1.0, tile.elevation * 0.6 + (1.0 - tile.water_flow) * 0.4))
+
+
+def manhattan(a: Coord, b: Coord) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
