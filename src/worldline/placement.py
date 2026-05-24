@@ -46,8 +46,7 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
     - lumber camps
     - mines
     - roads connecting settlements to resource exploitation entities
-
-    Forts, ruins, and battlefields are intentionally deferred until route structure exists.
+    - forts placed on strategically meaningful road chokepoints
     """
 
     settlement_candidates = find_settlement_candidates(world)
@@ -84,9 +83,15 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
         next_entity_id += 1
         road_specs.append((settlement, mine, f"{candidate.resource} fallback supply route", candidate.value))
 
+    roads: list[Entity] = []
     for settlement, resource_entity, label, weight in road_specs:
-        _create_road(world, entity_id=next_entity_id, start=settlement, end=resource_entity, label=label, weight=weight)
+        roads.append(
+            _create_road(world, entity_id=next_entity_id, start=settlement, end=resource_entity, label=label, weight=weight)
+        )
         next_entity_id += 1
+
+    if roads:
+        _create_fort(world, entity_id=next_entity_id, roads=roads)
 
 
 def find_settlement_candidates(world: World) -> list[SettlementCandidate]:
@@ -294,7 +299,7 @@ def _create_road(world: World, *, entity_id: int, start: Entity, end: Entity, la
         NodeType.GENERATED_ENTITY,
         f"Road_{entity_id:02d} carries {label}",
         entity_id=entity_id,
-        payload={"start_entity": start.id, "end_entity": end.id, "path_length": len(path)},
+        payload={"start_entity": start.id, "end_entity": end.id, "path_length": len(path), "route_weight": weight},
     )
     world.provenance.add_edge(route_node.id, road_node.id, EdgeType.LOCATES, weight=max(0.1, 1.0 / max(1, len(path))))
     world.provenance.add_edge(road_node.id, start.root_provenance_id, EdgeType.TRANSITS, weight=weight, payload={"connected_entity": end.id})
@@ -312,6 +317,131 @@ def _create_road(world: World, *, entity_id: int, start: Entity, end: Entity, la
     entity.state.clamp()
     world.entities[entity.id] = entity
     return entity
+
+
+def _create_fort(world: World, *, entity_id: int, roads: list[Entity]) -> Entity:
+    road = max(roads, key=lambda candidate: _fort_road_score(world, candidate))
+    fort_coord, chokepoint_score, midpoint_bias = _choose_fort_coord(world, road)
+    road_node = world.provenance.nodes[road.root_provenance_id]
+    start_entity = world.entities[road_node.payload["start_entity"]]
+    end_entity = world.entities[road_node.payload["end_entity"]]
+    route_weight = float(road_node.payload.get("route_weight", 0.0))
+    road_score = _fort_road_score(world, road)
+
+    pressure_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"route control pressure for {road.name}",
+        payload={
+            "road_entity": road.id,
+            "path_length": len(road.coordinates),
+            "route_weight": route_weight,
+            "start_entity": start_entity.id,
+            "end_entity": end_entity.id,
+            "strategic_score": road_score,
+        },
+    )
+    terrain_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"defensible road position on {road.name}",
+        payload={
+            "coord": fort_coord,
+            "road_entity": road.id,
+            "chokepoint_score": chokepoint_score,
+            "midpoint_bias": midpoint_bias,
+        },
+    )
+    fort_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Fort_{entity_id:02d} controls {road.name}",
+        entity_id=entity_id,
+        payload={
+            "coord": fort_coord,
+            "road_entity": road.id,
+            "strategic_score": road_score,
+            "chokepoint_score": chokepoint_score,
+        },
+    )
+
+    world.provenance.add_edge(
+        road.root_provenance_id,
+        fort_node.id,
+        EdgeType.ENABLES,
+        weight=max(0.1, route_weight + len(road.coordinates) / max(8.0, world.size / 2)),
+        payload={"role": "controlled_route", "road_entity": road.id},
+    )
+    world.provenance.add_edge(
+        terrain_node.id,
+        fort_node.id,
+        EdgeType.LOCATES,
+        weight=max(0.1, chokepoint_score),
+        payload={"coord": fort_coord},
+    )
+    world.provenance.add_edge(
+        pressure_node.id,
+        fort_node.id,
+        EdgeType.REQUIRES,
+        weight=max(0.1, road_score),
+    )
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.FORT,
+        subtype="RouteControl",
+        name=f"Fort_{entity_id:02d}",
+        coordinates=[fort_coord],
+        state=EntityState(
+            integrity=1.0,
+            wealth=min(0.8, 0.25 + route_weight * 0.45),
+            function=min(1.0, 0.4 + chokepoint_score * 0.6),
+            active=True,
+            status_label="Stable",
+        ),
+        root_provenance_id=fort_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+def _fort_road_score(world: World, road: Entity) -> float:
+    road_node = world.provenance.nodes[road.root_provenance_id]
+    start_entity = world.entities[road_node.payload["start_entity"]]
+    end_entity = world.entities[road_node.payload["end_entity"]]
+    length_score = len(road.coordinates) / max(6.0, world.size / 3)
+    route_weight = float(road_node.payload.get("route_weight", 0.0))
+    resource_bonus = 0.25 if end_entity.type in {EntityType.MINE, EntityType.LUMBER_CAMP} else 0.0
+    settlement_bonus = 0.10 if start_entity.type == EntityType.SETTLEMENT else 0.0
+    midpoint_coord = road.coordinates[len(road.coordinates) // 2]
+    tile = world.baseline[midpoint_coord]
+    terrain_bonus = max(0.0, tile.slope * 0.35 + tile.elevation * 0.20)
+    return route_weight + length_score + resource_bonus + settlement_bonus + terrain_bonus
+
+
+def _choose_fort_coord(world: World, road: Entity) -> tuple[Coord, float, float]:
+    if len(road.coordinates) <= 2:
+        coord = road.coordinates[len(road.coordinates) // 2]
+        return coord, 0.1, 1.0
+
+    midpoint_index = len(road.coordinates) // 2
+    interior = list(enumerate(road.coordinates[1:-1], start=1))
+    best_index, best_coord = max(
+        interior,
+        key=lambda item: _fort_coord_score(world, road, item[0], midpoint_index),
+    )
+    tile = world.baseline[best_coord]
+    chokepoint_score = max(0.1, tile.slope * 0.6 + tile.elevation * 0.4)
+    midpoint_bias = 1.0 - abs(best_index - midpoint_index) / max(1, midpoint_index)
+    return best_coord, chokepoint_score, max(0.0, midpoint_bias)
+
+
+def _fort_coord_score(world: World, road: Entity, index: int, midpoint_index: int) -> float:
+    coord = road.coordinates[index]
+    tile = world.baseline[coord]
+    endpoint_distance = min(index, len(road.coordinates) - 1 - index)
+    distance_score = min(1.0, endpoint_distance / max(1.0, len(road.coordinates) / 4))
+    midpoint_bias = 1.0 - abs(index - midpoint_index) / max(1, midpoint_index)
+    terrain_score = tile.slope * 0.45 + tile.elevation * 0.25 + (1.0 - tile.water_flow) * 0.10
+    return terrain_score + distance_score * 0.35 + midpoint_bias * 0.20
 
 
 def manhattan_path(start: Coord, end: Coord, *, size: int) -> list[Coord]:
