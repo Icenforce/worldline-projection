@@ -59,7 +59,7 @@ def inject_timber_destruction(world: World, *, magnitude: float = 0.9, t: int = 
     lumber.state.clamp()
 
     old_settlement_wealth = settlement.state.wealth
-    settlement.state.wealth = max(0.0, settlement.state.wealth - magnitude * 0.28)
+    settlement.state.wealth = max(0.0, settlement.state.wealth - magnitude * 0.40)
     settlement.state.function = max(0.0, settlement.state.function - magnitude * 0.20)
     settlement.state.stale = True
     settlement.state.clamp()

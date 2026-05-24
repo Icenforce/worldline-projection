@@ -30,6 +30,7 @@ def test_perturbation_degrades_generated_timber_dependent_settlement():
     inject_timber_destruction(world, magnitude=0.9, t=100)
 
     assert world.entities[settlement_id].state.wealth < before_wealth
+    assert world.entities[settlement_id].state.status_label == "Poor"
     assert world.entities[lumber_id].state.function < before_lumber_function
     assert "timber destruction" in explain_entity(world, settlement_id)
 
