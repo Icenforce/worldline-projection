@@ -284,7 +284,7 @@ def _create_mine(world: World, *, entity_id: int, settlement: Entity, candidate:
 
 
 def _create_road(world: World, *, entity_id: int, start: Entity, end: Entity, label: str, weight: float) -> Entity:
-    path = manhattan_path(start.coordinates[0], end.coordinates[0])
+    path = manhattan_path(start.coordinates[0], end.coordinates[0], size=world.size)
     route_node = world.provenance.add_node(
         NodeType.SUBSTRATE_PRECONDITION,
         f"transit corridor for {label}",
@@ -314,7 +314,7 @@ def _create_road(world: World, *, entity_id: int, start: Entity, end: Entity, la
     return entity
 
 
-def manhattan_path(start: Coord, end: Coord) -> list[Coord]:
+def manhattan_path(start: Coord, end: Coord, *, size: int) -> list[Coord]:
     x, y = start
     ex, ey = end
     path = [(x, y)]
@@ -326,6 +326,9 @@ def manhattan_path(start: Coord, end: Coord) -> list[Coord]:
     while y != ey:
         y += step_y
         path.append((x, y))
+    if len(path) == 1:
+        nx = x + 1 if x + 1 < size else x - 1
+        path.append((nx, y))
     return path
 
 
