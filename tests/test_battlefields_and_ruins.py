@@ -19,7 +19,18 @@ def test_battlefield_is_route_derived():
         route_edge = next(edge for edge in parent_edges if edge.edge_type == EdgeType.ENABLES)
         route_node = world.provenance.nodes[route_edge.source_node_id]
         assert route_node.entity_id is not None
-        assert world.entities[route_node.entity_id].type == EntityType.ROAD
+        road = world.entities[route_node.entity_id]
+        assert road.type == EntityType.ROAD
+
+        conflict_node = world.provenance.nodes[
+            next(edge.source_node_id for edge in parent_edges if edge.edge_type == EdgeType.CAUSES)
+        ]
+        fort = world.entities[conflict_node.payload["fort_entity"]]
+
+        assert battlefield.coordinates[0] in road.coordinates
+        assert 0 < road.coordinates.index(battlefield.coordinates[0]) < len(road.coordinates) - 1
+        assert fort.coordinates[0] in road.coordinates
+        assert battlefield.coordinates[0] != fort.coordinates[0]
 
 
 

@@ -449,13 +449,17 @@ def _fort_coord_score(world: World, road: Entity, index: int, midpoint_index: in
 
 
 def _create_battlefield(world: World, *, entity_id: int, roads: list[Entity], fort: Entity) -> Entity:
-    road = max(
-        roads,
-        key=lambda candidate: (
-            len(candidate.coordinates),
-            world.provenance.nodes[candidate.root_provenance_id].payload.get("route_weight", 0.0),
-        ),
-    )
+    fort_node = world.provenance.nodes[fort.root_provenance_id]
+    fort_road_id = fort_node.payload.get("road_entity")
+    road = next((candidate for candidate in roads if candidate.id == fort_road_id), None)
+    if road is None:
+        road = max(
+            roads,
+            key=lambda candidate: (
+                len(candidate.coordinates),
+                world.provenance.nodes[candidate.root_provenance_id].payload.get("route_weight", 0.0),
+            ),
+        )
     road_node = world.provenance.nodes[road.root_provenance_id]
     coord = _battlefield_coord(road, fort.coordinates[0])
     tile = world.baseline[coord]
@@ -553,10 +557,23 @@ def _create_ruin(world: World, *, entity_id: int, settlement_candidates: list[Se
 def _battlefield_coord(road: Entity, fort_coord: Coord) -> Coord:
     if len(road.coordinates) <= 2:
         return fort_coord
-    for coord in road.coordinates:
-        if coord != fort_coord:
+
+    try:
+        fort_index = road.coordinates.index(fort_coord)
+    except ValueError:
+        fort_index = len(road.coordinates) // 2
+
+    preferred_offsets = (-1, 1, -2, 2)
+    for offset in preferred_offsets:
+        candidate_index = fort_index + offset
+        if 0 < candidate_index < len(road.coordinates) - 1:
+            return road.coordinates[candidate_index]
+
+    for index, coord in enumerate(road.coordinates):
+        if 0 < index < len(road.coordinates) - 1 and coord != fort_coord:
             return coord
-    return road.coordinates[0]
+
+    return road.coordinates[fort_index]
 
 
 
