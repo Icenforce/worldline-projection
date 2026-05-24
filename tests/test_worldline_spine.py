@@ -39,11 +39,16 @@ def test_compaction_preserves_generated_dependency_explanation():
     world = generate_world(seed=12345, size=128)
     settlement_id, _ = find_timber_dependency_pair(world)
     inject_timber_destruction(world, magnitude=0.9, t=100)
-    compact_timber_collapse(world, t=142)
+    archive_id = compact_timber_collapse(world, t=142)
 
     explanation = explain_entity(world, settlement_id)
     assert "timber collapse archive" in explanation
     assert "CompactionArchiveEvent" in explanation
+
+    assert world.patches
+    patch = next(iter(world.patches.values()))
+    assert patch.archive_event_ids == [archive_id]
+    assert patch.tile_overrides
 
     results = run_validation(world)
     assert all(result.passed for result in results)

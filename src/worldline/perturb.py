@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from worldline.models import EdgeType, EntityType, NodeType, Perturbation, PerturbationType
+from worldline.models import (
+    EdgeType,
+    EntityType,
+    LocalBaselinePatch,
+    NodeType,
+    PatchTileDelta,
+    Perturbation,
+    PerturbationType,
+)
 from worldline.world import World
 
 
@@ -87,6 +95,7 @@ def compact_timber_collapse(world: World, *, t: int = 142) -> int:
     settlement_id, lumber_id = find_timber_dependency_pair(world)
     settlement = world.entities[settlement_id]
     lumber = world.entities[lumber_id]
+    source_perturbations = list(world.perturbations.values())
     archive_node = world.provenance.add_node(
         NodeType.COMPACTION_ARCHIVE_EVENT,
         "timber collapse archive for generated lumber dependency",
@@ -94,7 +103,7 @@ def compact_timber_collapse(world: World, *, t: int = 142) -> int:
             "event_type": "TimberCollapse",
             "time_range": [100, t],
             "spatial_scope": "demo_timber_region",
-            "source_perturbation_ids": list(world.perturbations.keys()),
+            "source_perturbation_ids": [perturbation.id for perturbation in source_perturbations],
             "affected_entities": {
                 settlement.name: {
                     "dependency_loss": 0.90,
@@ -126,5 +135,19 @@ def compact_timber_collapse(world: World, *, t: int = 142) -> int:
         EdgeType.CAUSES,
         weight=0.9,
         payload={"compacted": True, "meaning_preserved": True},
+    )
+
+    patch_id = len(world.patches) + 1
+    tile_overrides = {}
+    for perturbation in source_perturbations:
+        if perturbation.target_layer != "timber":
+            continue
+        tile_overrides[perturbation.origin] = PatchTileDelta(timber_delta=-perturbation.magnitude)
+    world.patches[patch_id] = LocalBaselinePatch(
+        id=patch_id,
+        region_id="demo_timber_region",
+        created_at_t=t,
+        tile_overrides=tile_overrides,
+        archive_event_ids=[archive_node.id],
     )
     return archive_node.id

@@ -46,9 +46,22 @@ def validate_compaction_archive_present(world: World) -> ValidationResult:
     )
 
 
+def validate_compaction_patches_present(world: World) -> ValidationResult:
+    patches = list(world.patches.values())
+    linked_patches = [patch.id for patch in patches if patch.archive_event_ids and patch.tile_overrides]
+    return ValidationResult(
+        name="compaction_patches_present",
+        passed=bool(linked_patches),
+        details=(
+            f"linked patches: {linked_patches}" if linked_patches else "no linked LocalBaselinePatch records present"
+        ),
+    )
+
+
 def run_validation(world: World) -> list[ValidationResult]:
     return [
         validate_no_orphan_entities(world),
         validate_load_bearing_edges(world),
         validate_compaction_archive_present(world),
+        validate_compaction_patches_present(world),
     ]
