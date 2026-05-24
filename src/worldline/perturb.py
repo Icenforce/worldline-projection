@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from worldline.models import (
     EdgeType,
+    Entity,
     EntityType,
     LocalBaselinePatch,
     NodeType,
@@ -12,6 +15,14 @@ from worldline.models import (
     PerturbationType,
 )
 from worldline.world import World
+
+
+@dataclass(frozen=True)
+class PropagationImpact:
+    source_entity_id: int
+    target_entity_id: int
+    edge_type: EdgeType
+    intensity: float
 
 
 def find_timber_dependency_pair(world: World) -> tuple[int, int]:
@@ -39,7 +50,6 @@ def find_timber_dependency_pair(world: World) -> tuple[int, int]:
 def inject_timber_destruction(world: World, *, magnitude: float = 0.9, t: int = 100) -> Perturbation:
     settlement_id, lumber_id = find_timber_dependency_pair(world)
     lumber = world.entities[lumber_id]
-    settlement = world.entities[settlement_id]
     origin = lumber.coordinates[0]
 
     perturbation = Perturbation(
@@ -61,32 +71,165 @@ def inject_timber_destruction(world: World, *, magnitude: float = 0.9, t: int = 
         payload={"magnitude": magnitude, "target_layer": "timber", "origin": origin},
     )
 
-    old_lumber_function = lumber.state.function
-    lumber.state.function = max(0.0, lumber.state.function * (1.0 - magnitude * 0.83))
-    lumber.state.stale = True
-    lumber.state.clamp()
+    impacted_entities = _find_direct_resource_impacts(world, perturbation)
+    if not impacted_entities:
+        raise RuntimeError("timber perturbation did not match any accountable resource dependency")
 
-    old_settlement_wealth = settlement.state.wealth
-    settlement.state.wealth = max(0.0, settlement.state.wealth - magnitude * 0.40)
-    settlement.state.function = max(0.0, settlement.state.function - magnitude * 0.20)
-    settlement.state.stale = True
-    settlement.state.clamp()
+    frontier = []
+    for entity in impacted_entities:
+        _apply_direct_resource_damage(world, entity=entity, perturbation=perturbation, perturb_node_id=perturb_node.id)
+        frontier.append((entity.id, perturbation.magnitude))
 
-    world.provenance.add_edge(
-        perturb_node.id,
-        lumber.root_provenance_id,
-        EdgeType.DAMAGES,
-        weight=magnitude,
-        payload={"old_function": old_lumber_function, "new_function": lumber.state.function},
-    )
-    world.provenance.add_edge(
-        perturb_node.id,
-        settlement.root_provenance_id,
-        EdgeType.DAMAGES,
-        weight=magnitude,
-        payload={"old_wealth": old_settlement_wealth, "new_wealth": settlement.state.wealth},
-    )
+    for impact in _propagate_damage(world, frontier=frontier):
+        _apply_propagated_damage(world, impact=impact)
+
     return perturbation
+
+
+def _find_direct_resource_impacts(world: World, perturbation: Perturbation) -> list[Entity]:
+    impacted: list[Entity] = []
+    for entity in world.entities.values():
+        if perturbation.target_layer == "timber" and entity.type != EntityType.LUMBER_CAMP:
+            continue
+        if perturbation.target_layer in {"iron", "coal"} and entity.type != EntityType.MINE:
+            continue
+        if not any(_coord_in_radius(perturbation.origin, coord, perturbation.radius) for coord in entity.coordinates):
+            continue
+        if _entity_has_matching_substrate_precondition(world, entity, perturbation):
+            impacted.append(entity)
+    return impacted
+
+
+def _entity_has_matching_substrate_precondition(world: World, entity: Entity, perturbation: Perturbation) -> bool:
+    for edge, parent in world.provenance.parents_of(entity.root_provenance_id):
+        if parent.node_type != NodeType.SUBSTRATE_PRECONDITION:
+            continue
+        coord = parent.payload.get("coord")
+        if coord != perturbation.origin:
+            continue
+        if perturbation.target_layer not in parent.payload:
+            continue
+        if edge.edge_type not in {EdgeType.ENABLES, EdgeType.LOCATES, EdgeType.REQUIRES}:
+            continue
+        return True
+    return False
+
+
+def _apply_direct_resource_damage(
+    world: World,
+    *,
+    entity: Entity,
+    perturbation: Perturbation,
+    perturb_node_id: int,
+) -> None:
+    old_function = entity.state.function
+    old_integrity = entity.state.integrity
+    entity.state.function = max(0.0, entity.state.function * (1.0 - perturbation.magnitude * 0.83))
+    entity.state.integrity = max(0.0, entity.state.integrity - perturbation.magnitude * 0.25)
+    entity.state.stale = True
+    entity.state.clamp()
+
+    world.provenance.add_edge(
+        perturb_node_id,
+        entity.root_provenance_id,
+        EdgeType.DAMAGES,
+        weight=perturbation.magnitude,
+        payload={
+            "target_layer": perturbation.target_layer,
+            "old_function": old_function,
+            "new_function": entity.state.function,
+            "old_integrity": old_integrity,
+            "new_integrity": entity.state.integrity,
+        },
+    )
+
+
+def _propagate_damage(world: World, *, frontier: list[tuple[int, float]]) -> list[PropagationImpact]:
+    queue = list(frontier)
+    impacts: list[PropagationImpact] = []
+    best_seen: dict[tuple[int, int], float] = {}
+
+    while queue:
+        source_entity_id, source_intensity = queue.pop(0)
+        source_entity = world.entities[source_entity_id]
+        for edge, child in world.provenance.children_of(source_entity.root_provenance_id):
+            if child.entity_id is None:
+                continue
+            propagated = _edge_propagation_intensity(edge_type=edge.edge_type, edge_weight=edge.weight, source_intensity=source_intensity)
+            if propagated <= 0.0:
+                continue
+            key = (source_entity_id, child.entity_id)
+            if propagated <= best_seen.get(key, 0.0):
+                continue
+            best_seen[key] = propagated
+            impact = PropagationImpact(
+                source_entity_id=source_entity_id,
+                target_entity_id=child.entity_id,
+                edge_type=edge.edge_type,
+                intensity=propagated,
+            )
+            impacts.append(impact)
+            queue.append((child.entity_id, propagated))
+    return impacts
+
+
+def _edge_propagation_intensity(*, edge_type: EdgeType, edge_weight: float, source_intensity: float) -> float:
+    if edge_type == EdgeType.SUPPLIES:
+        return source_intensity * edge_weight
+    if edge_type == EdgeType.ENABLES:
+        return source_intensity * edge_weight * 0.65
+    if edge_type == EdgeType.TRANSITS:
+        return source_intensity * edge_weight * 0.30
+    if edge_type == EdgeType.REQUIRES:
+        return source_intensity * edge_weight * 0.80
+    return 0.0
+
+
+def _apply_propagated_damage(world: World, *, impact: PropagationImpact) -> None:
+    source_entity = world.entities[impact.source_entity_id]
+    target_entity = world.entities[impact.target_entity_id]
+    intensity = max(0.0, min(1.0, impact.intensity))
+
+    old_wealth = target_entity.state.wealth
+    old_function = target_entity.state.function
+    old_integrity = target_entity.state.integrity
+
+    if impact.edge_type == EdgeType.SUPPLIES:
+        target_entity.state.wealth = max(0.0, target_entity.state.wealth - intensity * 0.40)
+        target_entity.state.function = max(0.0, target_entity.state.function - intensity * 0.20)
+    elif impact.edge_type == EdgeType.TRANSITS:
+        target_entity.state.function = max(0.0, target_entity.state.function - intensity * 0.10)
+    elif impact.edge_type == EdgeType.ENABLES:
+        target_entity.state.function = max(0.0, target_entity.state.function - intensity * 0.16)
+    elif impact.edge_type == EdgeType.REQUIRES:
+        target_entity.state.integrity = max(0.0, target_entity.state.integrity - intensity * 0.12)
+        target_entity.state.function = max(0.0, target_entity.state.function - intensity * 0.12)
+    else:
+        return
+
+    target_entity.state.stale = True
+    target_entity.state.clamp()
+
+    world.provenance.add_edge(
+        source_entity.root_provenance_id,
+        target_entity.root_provenance_id,
+        EdgeType.DAMAGES,
+        weight=intensity,
+        payload={
+            "propagated_via": impact.edge_type,
+            "source_entity": source_entity.id,
+            "old_wealth": old_wealth,
+            "new_wealth": target_entity.state.wealth,
+            "old_function": old_function,
+            "new_function": target_entity.state.function,
+            "old_integrity": old_integrity,
+            "new_integrity": target_entity.state.integrity,
+        },
+    )
+
+
+def _coord_in_radius(origin: tuple[int, int], coord: tuple[int, int], radius: int) -> bool:
+    return abs(origin[0] - coord[0]) + abs(origin[1] - coord[1]) <= radius
 
 
 def compact_timber_collapse(world: World, *, t: int = 142) -> int:
