@@ -45,9 +45,9 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
     - settlements
     - lumber camps
     - mines
+    - roads connecting settlements to resource exploitation entities
 
-    Roads, forts, ruins, and battlefields are intentionally deferred to the next Gate 2
-    increment because they require route and history passes.
+    Forts, ruins, and battlefields are intentionally deferred until route structure exists.
     """
 
     settlement_candidates = find_settlement_candidates(world)
@@ -58,6 +58,7 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
         raise RuntimeError("no accountable settlement candidates found")
 
     next_entity_id = 1
+    road_specs: list[tuple[Entity, Entity, str, float]] = []
     for index, candidate in enumerate(chosen_settlements, start=1):
         settlement = _create_settlement(world, entity_id=next_entity_id, index=index, candidate=candidate)
         next_entity_id += 1
@@ -66,20 +67,26 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
             world, candidate.coord, resource="timber", max_distance=max(12, world.size // 8)
         )
         if lumber_candidate is not None and lumber_candidate.value > 0.25:
-            _create_lumber_camp(world, entity_id=next_entity_id, settlement=settlement, candidate=lumber_candidate)
+            lumber = _create_lumber_camp(world, entity_id=next_entity_id, settlement=settlement, candidate=lumber_candidate)
             next_entity_id += 1
+            road_specs.append((settlement, lumber, "timber supply route", lumber_candidate.value))
 
         mine_candidate = best_mineral_candidate_near(world, candidate.coord, max_distance=max(18, world.size // 6))
         if mine_candidate is not None and mine_candidate.value > 0.35:
-            _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=mine_candidate)
+            mine = _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=mine_candidate)
             next_entity_id += 1
+            road_specs.append((settlement, mine, f"{mine_candidate.resource} supply route", mine_candidate.value))
 
-    # Gate 2 invariant: the first accountable placement pass must contain at least one
-    # explicit mine, even if the highest-scoring settlements were not near strong minerals.
     if not any(entity.type == EntityType.MINE for entity in world.entities.values()):
         settlement = first_settlement(world)
         candidate = best_global_mineral_candidate(world)
-        _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=candidate)
+        mine = _create_mine(world, entity_id=next_entity_id, settlement=settlement, candidate=candidate)
+        next_entity_id += 1
+        road_specs.append((settlement, mine, f"{candidate.resource} fallback supply route", candidate.value))
+
+    for settlement, resource_entity, label, weight in road_specs:
+        _create_road(world, entity_id=next_entity_id, start=settlement, end=resource_entity, label=label, weight=weight)
+        next_entity_id += 1
 
 
 def find_settlement_candidates(world: World) -> list[SettlementCandidate]:
@@ -187,11 +194,7 @@ def _create_settlement(
     water_node = world.provenance.add_node(
         NodeType.SUBSTRATE_PRECONDITION,
         f"water/fertility support for Settlement_{index:02d}",
-        payload={
-            "coord": candidate.coord,
-            "water_flow": tile.water_flow,
-            "fertility": tile.fertility,
-        },
+        payload={"coord": candidate.coord, "water_flow": tile.water_flow, "fertility": tile.fertility},
     )
     subtype_node = world.provenance.add_node(
         NodeType.SUBSTRATE_PRECONDITION,
@@ -202,11 +205,7 @@ def _create_settlement(
         NodeType.GENERATED_ENTITY,
         f"Settlement_{index:02d} placed by accountable settlement scoring",
         entity_id=entity_id,
-        payload={
-            "coord": candidate.coord,
-            "score": candidate.score,
-            "subtype": candidate.subtype,
-        },
+        payload={"coord": candidate.coord, "score": candidate.score, "subtype": candidate.subtype},
     )
 
     world.provenance.add_edge(water_node.id, settlement_node.id, EdgeType.LOCATES, weight=tile.fertility)
@@ -218,13 +217,7 @@ def _create_settlement(
         subtype=candidate.subtype,
         name=f"Settlement_{index:02d}",
         coordinates=[candidate.coord],
-        state=EntityState(
-            integrity=1.0,
-            wealth=min(0.9, 0.35 + candidate.score * 0.45),
-            function=1.0,
-            active=True,
-            status_label="Stable",
-        ),
+        state=EntityState(integrity=1.0, wealth=min(0.9, 0.35 + candidate.score * 0.45), function=1.0, active=True, status_label="Stable"),
         root_provenance_id=settlement_node.id,
     )
     entity.state.clamp()
@@ -232,9 +225,7 @@ def _create_settlement(
     return entity
 
 
-def _create_lumber_camp(
-    world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate
-) -> Entity:
+def _create_lumber_camp(world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate) -> Entity:
     timber_node = world.provenance.add_node(
         NodeType.SUBSTRATE_PRECONDITION,
         f"timber field exploited by LumberCamp_{entity_id:02d}",
@@ -263,9 +254,7 @@ def _create_lumber_camp(
     return entity
 
 
-def _create_mine(
-    world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate
-) -> Entity:
+def _create_mine(world: World, *, entity_id: int, settlement: Entity, candidate: ResourceCandidate) -> Entity:
     mineral_node = world.provenance.add_node(
         NodeType.SUBSTRATE_PRECONDITION,
         f"{candidate.resource} deposit exploited by Mine_{entity_id:02d}",
@@ -292,6 +281,52 @@ def _create_mine(
     entity.state.clamp()
     world.entities[entity.id] = entity
     return entity
+
+
+def _create_road(world: World, *, entity_id: int, start: Entity, end: Entity, label: str, weight: float) -> Entity:
+    path = manhattan_path(start.coordinates[0], end.coordinates[0])
+    route_node = world.provenance.add_node(
+        NodeType.SUBSTRATE_PRECONDITION,
+        f"transit corridor for {label}",
+        payload={"start_entity": start.id, "end_entity": end.id, "path_length": len(path)},
+    )
+    road_node = world.provenance.add_node(
+        NodeType.GENERATED_ENTITY,
+        f"Road_{entity_id:02d} carries {label}",
+        entity_id=entity_id,
+        payload={"start_entity": start.id, "end_entity": end.id, "path_length": len(path)},
+    )
+    world.provenance.add_edge(route_node.id, road_node.id, EdgeType.LOCATES, weight=max(0.1, 1.0 / max(1, len(path))))
+    world.provenance.add_edge(road_node.id, start.root_provenance_id, EdgeType.TRANSITS, weight=weight, payload={"connected_entity": end.id})
+    world.provenance.add_edge(road_node.id, end.root_provenance_id, EdgeType.TRANSITS, weight=weight, payload={"connected_entity": start.id})
+
+    entity = Entity(
+        id=entity_id,
+        type=EntityType.ROAD,
+        subtype="SupplyRoute",
+        name=f"Road_{entity_id:02d}",
+        coordinates=path,
+        state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True, status_label="Stable"),
+        root_provenance_id=road_node.id,
+    )
+    entity.state.clamp()
+    world.entities[entity.id] = entity
+    return entity
+
+
+def manhattan_path(start: Coord, end: Coord) -> list[Coord]:
+    x, y = start
+    ex, ey = end
+    path = [(x, y)]
+    step_x = 1 if ex >= x else -1
+    while x != ex:
+        x += step_x
+        path.append((x, y))
+    step_y = 1 if ey >= y else -1
+    while y != ey:
+        y += step_y
+        path.append((x, y))
+    return path
 
 
 def isolation_score(world: World, coord: Coord) -> float:
