@@ -60,9 +60,9 @@ Raw resources such as timber, iron, and coal are substrate fields, not entities.
 
 ```text
 docs/                         Project contracts and design notes
-src/worldline/                 Python package
 tests/                         Validation tests
-demo_worldline.py              First command-line demo target
+demo_worldline.py              Main prototype implementation and CLI demo
+pyproject.toml                 Project metadata and dev dependencies
 ```
 
 ## Quick start
