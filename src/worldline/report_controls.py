@@ -79,6 +79,11 @@ def _comparison_table(comparison: NegativeControlComparison) -> str:
                 f"{_flag(comparison.control_compaction_retention_valid)} |"
             ),
             (
+                "| Perturbation consequence rate | "
+                f"{comparison.worldline_perturbation_consequence_rate:.2f} | "
+                f"{comparison.control_perturbation_consequence_rate:.2f} |"
+            ),
+            (
                 "| Contradiction count | "
                 f"{comparison.worldline_contradiction_count} | {comparison.control_contradiction_count} |"
             ),
@@ -106,6 +111,11 @@ def _timber_summary(comparison: NegativeControlComparison) -> str:
                 else "- Control C unexpectedly passed the timber causal-validity check in this run."
             ),
             (
+                "- Perturbation consequence rate: "
+                f"Worldline={comparison.worldline_perturbation_consequence_rate:.2f}, "
+                f"Control C={comparison.control_perturbation_consequence_rate:.2f}."
+            ),
+            (
                 "- Contradiction gap: "
                 f"Worldline={comparison.worldline_contradiction_count}, Control C={comparison.control_contradiction_count}."
             ),
@@ -127,6 +137,11 @@ def _route_cut_summary(comparison: NegativeControlComparison) -> str:
                 "- Control C can tell a coherent corridor-disruption story, but it still lacks executable dependency edges and retained entity-specific provenance."
                 if not comparison.control_compaction_retention_valid
                 else "- Control C unexpectedly retained route-cut compaction validity in this run."
+            ),
+            (
+                "- Perturbation consequence rate: "
+                f"Worldline={comparison.worldline_perturbation_consequence_rate:.2f}, "
+                f"Control C={comparison.control_perturbation_consequence_rate:.2f}."
             ),
             (
                 "- Contradiction gap: "

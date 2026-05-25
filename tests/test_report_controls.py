@@ -10,10 +10,12 @@ def test_render_comparison_report_includes_required_sections_and_metrics():
     assert "## Timber Perturbation: Worldline vs Control C" in report
     assert "## Route-Cut / Battlefield: Worldline vs Control C" in report
     assert "Compaction retention validity" in report
+    assert "Perturbation consequence rate" in report
     assert "Contradiction count" in report
     assert "Explanation depth" in report
     assert "## Limitations" in report
     assert "Worldline preserves a perturbation-linked timber explanation through compaction." in report
+    assert "Perturbation consequence rate: Worldline=1.00, Control C=1.00." in report
     assert "Control C can tell a coherent corridor-disruption story" in report
 
 

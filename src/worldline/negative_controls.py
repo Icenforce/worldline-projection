@@ -58,6 +58,8 @@ class NegativeControlComparison:
     control_post_perturbation_valid: bool
     worldline_compaction_retention_valid: bool
     control_compaction_retention_valid: bool
+    worldline_perturbation_consequence_rate: float
+    control_perturbation_consequence_rate: float
     worldline_contradiction_count: int
     control_contradiction_count: int
     worldline_explanation_depth: int
@@ -369,12 +371,14 @@ def explain_control_entity(world: ControlWorld, entity_id: int) -> str:
 def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
     worldline = generate_world(seed=seed, size=size)
     worldline_settlement_id, _ = find_timber_dependency_pair(worldline)
+    worldline_before = _state_signature(worldline.entities[worldline_settlement_id].state)
     inject_timber_destruction(worldline, magnitude=0.9, t=100)
     compact_timber_collapse(worldline, t=142)
     worldline_explanation = explain_entity(worldline, worldline_settlement_id)
 
     control = generate_control_c(seed=seed, size=size)
     control_pair = find_control_timber_dependency_pair(control)
+    control_before = _state_signature(control.entities[control_pair.settlement_id].state)
     inject_control_timber_destruction(control, magnitude=0.9, t=100)
     compact_control_timber_collapse(control, t=142)
     control_explanation = explain_control_entity(control, control_pair.settlement_id)
@@ -384,6 +388,14 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
         control_post_perturbation_valid=_control_post_perturbation_valid(control_explanation),
         worldline_compaction_retention_valid=_worldline_compaction_retention_valid(worldline_explanation),
         control_compaction_retention_valid=_control_compaction_retention_valid(control_explanation),
+        worldline_perturbation_consequence_rate=_single_entity_consequence_rate(
+            before=worldline_before,
+            after=_state_signature(worldline.entities[worldline_settlement_id].state),
+        ),
+        control_perturbation_consequence_rate=_single_entity_consequence_rate(
+            before=control_before,
+            after=_state_signature(control.entities[control_pair.settlement_id].state),
+        ),
         worldline_contradiction_count=_count_worldline_contradictions(worldline_explanation),
         control_contradiction_count=_count_control_contradictions(control, control_pair.settlement_id, control_explanation),
         worldline_explanation_depth=_explanation_depth(worldline_explanation),
@@ -394,12 +406,14 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
 def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
     worldline = generate_world(seed=seed, size=size)
     _, _, worldline_battlefield_id = find_route_conflict_triplet(worldline)
+    worldline_before = _state_signature(worldline.entities[worldline_battlefield_id].state)
     inject_route_cut(worldline, magnitude=0.75, t=120)
     compact_route_cut(worldline, t=160)
     worldline_explanation = explain_entity(worldline, worldline_battlefield_id)
 
     control = generate_control_c(seed=seed, size=size)
     control_triplet = find_control_route_conflict_triplet(control)
+    control_before = _state_signature(control.entities[control_triplet.battlefield_id].state)
     inject_control_route_cut(control, magnitude=0.75, t=120)
     compact_control_route_cut(control, t=160)
     control_explanation = explain_control_entity(control, control_triplet.battlefield_id)
@@ -409,6 +423,14 @@ def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128)
         control_post_perturbation_valid=_control_route_cut_post_perturbation_valid(control_explanation),
         worldline_compaction_retention_valid=_worldline_route_cut_compaction_retention_valid(worldline_explanation),
         control_compaction_retention_valid=_control_route_cut_compaction_retention_valid(control_explanation),
+        worldline_perturbation_consequence_rate=_single_entity_consequence_rate(
+            before=worldline_before,
+            after=_state_signature(worldline.entities[worldline_battlefield_id].state),
+        ),
+        control_perturbation_consequence_rate=_single_entity_consequence_rate(
+            before=control_before,
+            after=_state_signature(control.entities[control_triplet.battlefield_id].state),
+        ),
         worldline_contradiction_count=_count_worldline_route_cut_contradictions(worldline_explanation),
         control_contradiction_count=_count_control_route_cut_contradictions(control, control_triplet.battlefield_id, control_explanation),
         worldline_explanation_depth=_explanation_depth(worldline_explanation),
@@ -422,6 +444,18 @@ def _control_entity_is_relevant_to_perturbation(entity: ControlEntity, perturbat
     if perturbation["target_layer"] == "route":
         return entity.id in {perturbation.get("road_id"), perturbation.get("fort_id"), perturbation.get("battlefield_id")}
     return False
+
+
+def _state_signature(state: EntityState) -> tuple[float, float, float, str, bool]:
+    return (state.integrity, state.wealth, state.function, state.status_label, state.active)
+
+
+def _single_entity_consequence_rate(
+    *,
+    before: tuple[float, float, float, str, bool],
+    after: tuple[float, float, float, str, bool],
+) -> float:
+    return 1.0 if after != before else 0.0
 
 
 def _latest_control_perturbation(world: ControlWorld, *, target_layer: str) -> dict[str, object]:
