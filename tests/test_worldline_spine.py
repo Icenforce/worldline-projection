@@ -1,7 +1,8 @@
 from worldline.generate import generate_world
 from worldline.models import EdgeType, EntityType, NodeType
 from worldline.perturb import (
-    compact_timber_collapse,
+    compact_route_cut,
+    compact_perturbation_consequences,
     find_timber_dependency_pair,
     find_route_conflict_triplet,
     inject_route_cut,
@@ -69,17 +70,23 @@ def test_perturbation_propagates_along_existing_provenance_edges():
 
 def test_compaction_preserves_generated_dependency_explanation():
     world = generate_world(seed=12345, size=128)
-    settlement_id, _ = find_timber_dependency_pair(world)
-    inject_timber_destruction(world, magnitude=0.9, t=100)
-    archive_id = compact_timber_collapse(world, t=142)
+    settlement_id, lumber_id = find_timber_dependency_pair(world)
+    perturbation = inject_timber_destruction(world, magnitude=0.9, t=100)
+    bundle = compact_perturbation_consequences(world, perturbation_ids=[perturbation.id], t=142)
 
     explanation = explain_entity(world, settlement_id)
     assert "timber collapse archive" in explanation
     assert "CompactionArchiveEvent" in explanation
 
-    assert world.patches
-    patch = next(iter(world.patches.values()))
-    assert patch.archive_event_ids == [archive_id]
+    archive_node = world.provenance.nodes[bundle.archive_node_id]
+    assert archive_node.payload["source_perturbation_ids"] == [perturbation.id]
+    assert settlement_id in archive_node.payload["affected_entity_ids"]
+    assert lumber_id in archive_node.payload["affected_entity_ids"]
+    assert archive_node.payload["typed_provenance_links"]
+    assert archive_node.payload["affected_entities"][str(settlement_id)]["state_deltas"]
+
+    patch = world.patches[bundle.patch_id]
+    assert patch.archive_event_ids == [bundle.archive_node_id]
     assert patch.tile_overrides
 
     results = run_validation(world)
@@ -114,3 +121,25 @@ def test_route_cut_degrades_conflict_corridor_and_explains_impact():
     explanation = explain_entity(world, battlefield_id)
     assert "route cut" in explanation
     assert road.name in explanation
+
+
+def test_route_cut_compaction_preserves_conflict_explanation_and_bundle():
+    world = generate_world(seed=12345, size=128)
+    road_id, fort_id, battlefield_id = find_route_conflict_triplet(world)
+    perturbation = inject_route_cut(world, magnitude=0.75, t=120)
+    archive_id = compact_route_cut(world, t=160)
+
+    explanation = explain_entity(world, battlefield_id)
+    assert "route cut archive" in explanation
+    assert "CompactionArchiveEvent" in explanation
+
+    archive_node = world.provenance.nodes[archive_id]
+    assert archive_node.payload["source_perturbation_ids"] == [perturbation.id]
+    assert road_id in archive_node.payload["affected_entity_ids"]
+    assert fort_id in archive_node.payload["affected_entity_ids"]
+    assert battlefield_id in archive_node.payload["affected_entity_ids"]
+    assert archive_node.payload["typed_provenance_links"]
+    assert archive_node.payload["affected_entities"][str(battlefield_id)]["state_deltas"]
+
+    patch = next(patch for patch in world.patches.values() if patch.archive_event_ids == [archive_id])
+    assert patch.tile_overrides

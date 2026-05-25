@@ -1,4 +1,4 @@
-"""Perturbation and resolver skeleton for the first proof scenario."""
+"""Perturbation and resolver logic for executable consequence propagation."""
 
 from __future__ import annotations
 
@@ -23,6 +23,14 @@ class PropagationImpact:
     target_entity_id: int
     edge_type: EdgeType
     intensity: float
+
+
+@dataclass(frozen=True)
+class CompactedConsequenceBundle:
+    archive_node_id: int
+    patch_id: int
+    source_perturbation_ids: tuple[int, ...]
+    affected_entity_ids: tuple[int, ...]
 
 
 def find_timber_dependency_pair(world: World) -> tuple[int, int]:
@@ -253,7 +261,11 @@ def _propagate_damage(world: World, *, frontier: list[tuple[int, float]]) -> lis
         for edge, child in world.provenance.children_of(source_entity.root_provenance_id):
             if child.entity_id is None:
                 continue
-            propagated = _edge_propagation_intensity(edge_type=edge.edge_type, edge_weight=edge.weight, source_intensity=source_intensity)
+            propagated = _edge_propagation_intensity(
+                edge_type=edge.edge_type,
+                edge_weight=edge.weight,
+                source_intensity=source_intensity,
+            )
             if propagated <= 0.0:
                 continue
             key = (source_entity_id, child.entity_id)
@@ -330,65 +342,253 @@ def _coord_in_radius(origin: tuple[int, int], coord: tuple[int, int], radius: in
     return abs(origin[0] - coord[0]) + abs(origin[1] - coord[1]) <= radius
 
 
-def compact_timber_collapse(world: World, *, t: int = 142) -> int:
-    """Create a compaction archive node without erasing causal explanation."""
+def compact_perturbation_consequences(
+    world: World,
+    *,
+    perturbation_ids: list[int] | None = None,
+    t: int = 142,
+) -> CompactedConsequenceBundle:
+    """Archive perturbation consequences without erasing causal explanation."""
 
-    settlement_id, lumber_id = find_timber_dependency_pair(world)
-    settlement = world.entities[settlement_id]
-    lumber = world.entities[lumber_id]
-    source_perturbations = list(world.perturbations.values())
-    archive_node = world.provenance.add_node(
-        NodeType.COMPACTION_ARCHIVE_EVENT,
-        "timber collapse archive for generated lumber dependency",
-        payload={
-            "event_type": "TimberCollapse",
-            "time_range": [100, t],
-            "spatial_scope": "demo_timber_region",
-            "source_perturbation_ids": [perturbation.id for perturbation in source_perturbations],
-            "affected_entities": {
-                settlement.name: {
-                    "dependency_loss": 0.90,
-                    "wealth": settlement.state.wealth,
-                    "function": settlement.state.function,
-                },
-                lumber.name: {
-                    "dependency_loss": 0.90,
-                    "function": lumber.state.function,
-                },
+    source_perturbations = _resolve_source_perturbations(world, perturbation_ids)
+    direct_damage_edges, all_damage_edges = _collect_damage_edges(world, source_perturbations)
+    if not direct_damage_edges:
+        raise RuntimeError("no direct perturbation damage edges found for compaction")
+
+    affected_entity_ids = _affected_entity_ids(world, all_damage_edges)
+    archive_label = _archive_label(world, source_perturbations)
+    archive_payload = {
+        "event_type": _archive_event_type(source_perturbations),
+        "time_range": [min(perturbation.t for perturbation in source_perturbations), t],
+        "spatial_scope": _spatial_scope(source_perturbations),
+        "source_perturbation_ids": [perturbation.id for perturbation in source_perturbations],
+        "affected_entity_ids": affected_entity_ids,
+        "affected_entities": _affected_entities_payload(world, affected_entity_ids, all_damage_edges),
+        "typed_provenance_links": _typed_provenance_links(all_damage_edges),
+        "causal_sequence": _causal_sequence(world, source_perturbations, all_damage_edges, t=t),
+    }
+    archive_node = world.provenance.add_node(NodeType.COMPACTION_ARCHIVE_EVENT, archive_label, payload=archive_payload)
+
+    for entity_id in affected_entity_ids:
+        entity = world.entities[entity_id]
+        related_edges = [edge for edge in all_damage_edges if edge.target_node_id == entity.root_provenance_id]
+        link_types = sorted(
+            {
+                str(edge.payload.get("propagated_via", EdgeType.DAMAGES))
+                for edge in related_edges
+            }
+        )
+        state_deltas = [
+            {
+                key: value
+                for key, value in edge.payload.items()
+                if key.startswith("old_") or key.startswith("new_")
+            }
+            for edge in related_edges
+        ]
+        world.provenance.add_edge(
+            archive_node.id,
+            entity.root_provenance_id,
+            EdgeType.CAUSES,
+            weight=max((edge.weight for edge in related_edges), default=0.1),
+            payload={
+                "compacted": True,
+                "meaning_preserved": True,
+                "source_perturbation_ids": [perturbation.id for perturbation in source_perturbations],
+                "affected_entity_id": entity_id,
+                "preserved_link_types": link_types,
+                "state_deltas": state_deltas,
             },
-            "causal_sequence": [
-                [100, "ResourceDestruction", "timber field damaged"],
-                [115, "LumberCamp function collapse", "timber extraction degraded"],
-                [142, "Settlement degradation", "wealth/function declined"],
-            ],
-        },
-    )
-    world.provenance.add_edge(
-        archive_node.id,
-        settlement.root_provenance_id,
-        EdgeType.CAUSES,
-        weight=0.9,
-        payload={"compacted": True, "meaning_preserved": True},
-    )
-    world.provenance.add_edge(
-        archive_node.id,
-        lumber.root_provenance_id,
-        EdgeType.CAUSES,
-        weight=0.9,
-        payload={"compacted": True, "meaning_preserved": True},
+        )
+
+    patch_id = _create_compaction_patch(world, source_perturbations, archive_node.id, t=t)
+    return CompactedConsequenceBundle(
+        archive_node_id=archive_node.id,
+        patch_id=patch_id,
+        source_perturbation_ids=tuple(perturbation.id for perturbation in source_perturbations),
+        affected_entity_ids=tuple(affected_entity_ids),
     )
 
-    patch_id = len(world.patches) + 1
-    tile_overrides = {}
-    for perturbation in source_perturbations:
-        if perturbation.target_layer != "timber":
+
+def compact_timber_collapse(world: World, *, t: int = 142) -> int:
+    bundle = compact_perturbation_consequences(
+        world,
+        perturbation_ids=[perturbation.id for perturbation in world.perturbations.values() if perturbation.target_layer == "timber"],
+        t=t,
+    )
+    return bundle.archive_node_id
+
+
+def compact_route_cut(world: World, *, t: int = 142) -> int:
+    bundle = compact_perturbation_consequences(
+        world,
+        perturbation_ids=[perturbation.id for perturbation in world.perturbations.values() if perturbation.target_layer == "route"],
+        t=t,
+    )
+    return bundle.archive_node_id
+
+
+def _resolve_source_perturbations(world: World, perturbation_ids: list[int] | None) -> list[Perturbation]:
+    if perturbation_ids is None:
+        perturbations = list(world.perturbations.values())
+    else:
+        perturbations = [world.perturbations[perturbation_id] for perturbation_id in perturbation_ids]
+    if not perturbations:
+        raise RuntimeError("no perturbations available for compaction")
+    return perturbations
+
+
+def _collect_damage_edges(
+    world: World,
+    source_perturbations: list[Perturbation],
+) -> tuple[list, list]:
+    perturbation_event_node_ids = {
+        node.id
+        for node in world.provenance.nodes.values()
+        if node.node_type == NodeType.PERTURBATION_EVENT and node.event_id in {perturbation.id for perturbation in source_perturbations}
+    }
+    direct_damage_edges = [
+        edge
+        for edge in world.provenance.edges.values()
+        if edge.edge_type == EdgeType.DAMAGES and edge.source_node_id in perturbation_event_node_ids
+    ]
+
+    all_damage_edges = list(direct_damage_edges)
+    queue = [edge.target_node_id for edge in direct_damage_edges]
+    seen_targets = set(queue)
+    seen_edges = {edge.id for edge in direct_damage_edges}
+    while queue:
+        source_node_id = queue.pop(0)
+        for edge in world.provenance.edges.values():
+            if edge.edge_type != EdgeType.DAMAGES or edge.source_node_id != source_node_id:
+                continue
+            if edge.id not in seen_edges:
+                seen_edges.add(edge.id)
+                all_damage_edges.append(edge)
+            if edge.target_node_id not in seen_targets:
+                seen_targets.add(edge.target_node_id)
+                queue.append(edge.target_node_id)
+    return direct_damage_edges, all_damage_edges
+
+
+def _affected_entity_ids(world: World, damage_edges: list) -> list[int]:
+    affected: list[int] = []
+    for edge in damage_edges:
+        target = world.provenance.nodes[edge.target_node_id]
+        if target.entity_id is None:
             continue
-        tile_overrides[perturbation.origin] = PatchTileDelta(timber_delta=-perturbation.magnitude)
+        if target.entity_id not in affected:
+            affected.append(target.entity_id)
+    return affected
+
+
+def _archive_label(world: World, source_perturbations: list[Perturbation]) -> str:
+    first = source_perturbations[0]
+    if first.target_layer == "timber":
+        _, lumber_id = find_timber_dependency_pair(world)
+        lumber = world.entities[lumber_id]
+        return f"timber collapse archive for generated {lumber.name.lower()} dependency"
+    if first.target_layer == "route":
+        road_id = first.payload["road_id"]
+        road = world.entities[road_id]
+        return f"route cut archive for {road.name} conflict corridor"
+    return f"compaction archive for {first.target_layer} consequence bundle"
+
+
+def _archive_event_type(source_perturbations: list[Perturbation]) -> str:
+    if len(source_perturbations) == 1:
+        perturbation = source_perturbations[0]
+        if perturbation.target_layer == "timber":
+            return "TimberCollapse"
+        if perturbation.target_layer == "route":
+            return "RouteCut"
+        return str(perturbation.type)
+    return "CompositeConsequenceBundle"
+
+
+def _spatial_scope(source_perturbations: list[Perturbation]) -> str:
+    first = source_perturbations[0]
+    if "region_id" in first.payload:
+        return str(first.payload["region_id"])
+    if first.target_layer == "route":
+        return f"road_entity_{first.payload['road_id']}"
+    return f"perturbation_origin_{first.origin[0]}_{first.origin[1]}"
+
+
+def _affected_entities_payload(world: World, affected_entity_ids: list[int], damage_edges: list) -> dict[str, dict]:
+    payload: dict[str, dict] = {}
+    for entity_id in affected_entity_ids:
+        entity = world.entities[entity_id]
+        related_edges = [edge for edge in damage_edges if edge.target_node_id == entity.root_provenance_id]
+        payload[str(entity_id)] = {
+            "entity_id": entity.id,
+            "name": entity.name,
+            "type": str(entity.type),
+            "final_state": {
+                "integrity": entity.state.integrity,
+                "wealth": entity.state.wealth,
+                "function": entity.state.function,
+                "status_label": entity.state.status_label,
+            },
+            "state_deltas": [
+                {
+                    key: value
+                    for key, value in edge.payload.items()
+                    if key.startswith("old_") or key.startswith("new_")
+                }
+                for edge in related_edges
+            ],
+        }
+    return payload
+
+
+def _typed_provenance_links(damage_edges: list) -> list[dict]:
+    links: list[dict] = []
+    for edge in damage_edges:
+        links.append(
+            {
+                "source_node_id": edge.source_node_id,
+                "target_node_id": edge.target_node_id,
+                "edge_type": str(edge.edge_type),
+                "weight": edge.weight,
+                "payload": dict(edge.payload),
+            }
+        )
+    return links
+
+
+def _causal_sequence(world: World, source_perturbations: list[Perturbation], damage_edges: list, *, t: int) -> list[list]:
+    sequence: list[list] = []
+    for perturbation in sorted(source_perturbations, key=lambda item: item.t):
+        sequence.append([perturbation.t, str(perturbation.type), f"{perturbation.target_layer} damaged at {perturbation.origin}"])
+    for edge in damage_edges:
+        target = world.provenance.nodes[edge.target_node_id]
+        if target.entity_id is None:
+            continue
+        entity = world.entities[target.entity_id]
+        propagated_via = edge.payload.get("propagated_via", EdgeType.DAMAGES)
+        sequence.append([t, str(propagated_via), f"{entity.name} changed under {propagated_via}"])
+    return sequence
+
+
+def _create_compaction_patch(world: World, source_perturbations: list[Perturbation], archive_node_id: int, *, t: int) -> int:
+    patch_id = len(world.patches) + 1
+    tile_overrides: dict[tuple[int, int], PatchTileDelta] = {}
+    for perturbation in source_perturbations:
+        if perturbation.target_layer == "timber":
+            tile_overrides[perturbation.origin] = PatchTileDelta(timber_delta=-perturbation.magnitude)
+        elif perturbation.target_layer == "iron":
+            tile_overrides[perturbation.origin] = PatchTileDelta(iron_delta=-perturbation.magnitude)
+        elif perturbation.target_layer == "coal":
+            tile_overrides[perturbation.origin] = PatchTileDelta(coal_delta=-perturbation.magnitude)
+        else:
+            tile_overrides[perturbation.origin] = PatchTileDelta()
+
     world.patches[patch_id] = LocalBaselinePatch(
         id=patch_id,
-        region_id="demo_timber_region",
+        region_id=_spatial_scope(source_perturbations),
         created_at_t=t,
         tile_overrides=tile_overrides,
-        archive_event_ids=[archive_node.id],
+        archive_event_ids=[archive_node_id],
     )
-    return archive_node.id
+    return patch_id
