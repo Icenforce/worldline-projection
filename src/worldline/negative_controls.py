@@ -12,7 +12,14 @@ from dataclasses import dataclass, field
 
 from worldline.generate import generate_world
 from worldline.models import BaselineTile, EntityState, EntityType
-from worldline.perturb import compact_timber_collapse, find_timber_dependency_pair, inject_timber_destruction
+from worldline.perturb import (
+    compact_route_cut,
+    compact_timber_collapse,
+    find_route_conflict_triplet,
+    find_timber_dependency_pair,
+    inject_route_cut,
+    inject_timber_destruction,
+)
 from worldline.placement import best_resource_candidate_near, choose_spread_candidates, find_settlement_candidates
 from worldline.query import explain_entity
 from worldline.substrate import generate_substrate
@@ -55,6 +62,19 @@ class NegativeControlComparison:
     control_contradiction_count: int
     worldline_explanation_depth: int
     control_explanation_depth: int
+
+
+@dataclass(frozen=True)
+class ControlDependencyPair:
+    settlement_id: int
+    lumber_camp_id: int
+
+
+@dataclass(frozen=True)
+class ControlRouteConflictTriplet:
+    road_id: int
+    fort_id: int
+    battlefield_id: int
 
 
 def generate_control_c(seed: int = 12345, size: int = 128, *, settlement_count: int = 5) -> ControlWorld:
@@ -124,13 +144,66 @@ def generate_control_c(seed: int = 12345, size: int = 128, *, settlement_count: 
             settlement.supporting_entity_id = lumber.id
             next_entity_id += 1
 
+    _add_control_route_conflict(world, next_entity_id=next_entity_id)
     return world
 
 
-@dataclass(frozen=True)
-class ControlDependencyPair:
-    settlement_id: int
-    lumber_camp_id: int
+def _add_control_route_conflict(world: ControlWorld, *, next_entity_id: int) -> None:
+    reference_world = generate_world(seed=world.seed, size=world.size)
+    road_id, fort_id, battlefield_id = find_route_conflict_triplet(reference_world)
+    road = reference_world.entities[road_id]
+    fort = reference_world.entities[fort_id]
+    battlefield = reference_world.entities[battlefield_id]
+
+    control_road = ControlEntity(
+        id=next_entity_id,
+        type=EntityType.ROAD,
+        subtype=road.subtype,
+        name=f"ControlRoad_{next_entity_id:02d}",
+        coordinates=list(road.coordinates),
+        state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True, status_label="Stable"),
+        explanation_template=(
+            f"Road corridor inferred along {len(road.coordinates)} cells because it plausibly connects a strategic choke "
+            f"between settlements and resource traffic."
+        ),
+        notes={"heuristic_role": "route_corridor"},
+    )
+    control_road.state.clamp()
+    world.entities[control_road.id] = control_road
+
+    control_fort = ControlEntity(
+        id=next_entity_id + 1,
+        type=EntityType.FORT,
+        subtype=fort.subtype,
+        name=f"ControlFort_{next_entity_id + 1:02d}",
+        coordinates=list(fort.coordinates),
+        state=EntityState(integrity=1.0, wealth=0.4, function=1.0, active=True),
+        explanation_template=(
+            f"Fort inferred at {fort.coordinates[0]} because a road chokepoint and route-control intuition make the "
+            f"location defensible."
+        ),
+        supporting_entity_id=control_road.id,
+        notes={"heuristic_role": "route_control"},
+    )
+    control_fort.state.clamp()
+    world.entities[control_fort.id] = control_fort
+
+    control_battlefield = ControlEntity(
+        id=next_entity_id + 2,
+        type=EntityType.BATTLEFIELD,
+        subtype=battlefield.subtype,
+        name=f"ControlBattlefield_{next_entity_id + 2:02d}",
+        coordinates=list(battlefield.coordinates),
+        state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True),
+        explanation_template=(
+            f"Battlefield inferred near {battlefield.coordinates[0]} because forts and roads often imply conflict corridors "
+            f"in post-hoc historical reconstruction."
+        ),
+        supporting_entity_id=control_road.id,
+        notes={"fort_entity_id": control_fort.id, "heuristic_role": "conflict_corridor"},
+    )
+    control_battlefield.state.clamp()
+    world.entities[control_battlefield.id] = control_battlefield
 
 
 def find_control_timber_dependency_pair(world: ControlWorld) -> ControlDependencyPair:
@@ -148,6 +221,23 @@ def find_control_timber_dependency_pair(world: ControlWorld) -> ControlDependenc
     if best is None:
         raise RuntimeError("control world has no timber dependency pair")
     return ControlDependencyPair(settlement_id=best[1], lumber_camp_id=best[2])
+
+
+def find_control_route_conflict_triplet(world: ControlWorld) -> ControlRouteConflictTriplet:
+    for entity in world.entities.values():
+        if entity.type != EntityType.BATTLEFIELD:
+            continue
+        road_id = entity.supporting_entity_id
+        fort_id = int(entity.notes.get("fort_entity_id", 0))
+        if road_id is None or fort_id == 0:
+            continue
+        road = world.entities.get(road_id)
+        fort = world.entities.get(fort_id)
+        if road is None or fort is None:
+            continue
+        if road.type == EntityType.ROAD and fort.type == EntityType.FORT:
+            return ControlRouteConflictTriplet(road_id=road.id, fort_id=fort.id, battlefield_id=entity.id)
+    raise RuntimeError("control world has no route conflict triplet")
 
 
 def inject_control_timber_destruction(world: ControlWorld, *, magnitude: float = 0.9, t: int = 100) -> dict[str, object]:
@@ -179,13 +269,63 @@ def inject_control_timber_destruction(world: ControlWorld, *, magnitude: float =
     return perturbation
 
 
+def inject_control_route_cut(world: ControlWorld, *, magnitude: float = 0.75, t: int = 120) -> dict[str, object]:
+    triplet = find_control_route_conflict_triplet(world)
+    road = world.entities[triplet.road_id]
+    fort = world.entities[triplet.fort_id]
+    battlefield = world.entities[triplet.battlefield_id]
+    origin = road.coordinates[len(road.coordinates) // 2]
+
+    perturbation = {
+        "id": len(world.perturbations) + 1,
+        "t": t,
+        "type": "RouteCut",
+        "target_layer": "route",
+        "origin": origin,
+        "magnitude": magnitude,
+        "road_id": road.id,
+        "fort_id": fort.id,
+        "battlefield_id": battlefield.id,
+    }
+    world.perturbations.append(perturbation)
+
+    road.state.function = max(0.0, road.state.function * (1.0 - magnitude * 0.65))
+    road.state.integrity = max(0.0, road.state.integrity - magnitude * 0.45)
+    road.state.stale = True
+    road.state.clamp()
+
+    fort.state.function = max(0.0, fort.state.function - magnitude * 0.08)
+    fort.state.integrity = max(0.0, fort.state.integrity - magnitude * 0.08)
+    fort.state.stale = True
+    fort.state.clamp()
+
+    battlefield.state.function = max(0.0, battlefield.state.function - magnitude * 0.10)
+    battlefield.state.stale = True
+    battlefield.state.clamp()
+    return perturbation
+
+
 def compact_control_timber_collapse(world: ControlWorld, *, t: int = 142) -> dict[str, object]:
-    pair = find_control_timber_dependency_pair(world)
+    perturbation = _latest_control_perturbation(world, target_layer="timber")
     archive = {
         "id": len(world.compaction_archives) + 1,
         "t": t,
         "summary": "timber collapse compacted into local archive summary",
-        "affected_entities": [pair.settlement_id, pair.lumber_camp_id],
+        "affected_entities": [perturbation["settlement_id"], perturbation["lumber_camp_id"]],
+        "target_layer": "timber",
+    }
+    world.compaction_archives.append(archive)
+    return archive
+
+
+def compact_control_route_cut(world: ControlWorld, *, t: int = 160) -> dict[str, object]:
+    perturbation = _latest_control_perturbation(world, target_layer="route")
+    archive = {
+        "id": len(world.compaction_archives) + 1,
+        "t": t,
+        "summary": "route cut compacted into corridor disruption summary",
+        "affected_entities": [perturbation["road_id"], perturbation["fort_id"], perturbation["battlefield_id"]],
+        "target_layer": "route",
     }
     world.compaction_archives.append(archive)
     return archive
@@ -200,24 +340,29 @@ def explain_control_entity(world: ControlWorld, entity_id: int) -> str:
         f"- {entity.explanation_template}",
     ]
 
-    if world.perturbations and entity.supporting_resource == "timber":
-        latest = world.perturbations[-1]
-        lines.append(
-            "- heuristic update: nearby timber destruction is used as a plausible retrospective cause, "
-            "but this attribution is inferred from proximity/state similarity rather than from executable provenance."
-        )
+    latest = world.perturbations[-1] if world.perturbations else None
+    if latest is not None and _control_entity_is_relevant_to_perturbation(entity, latest):
+        if latest["target_layer"] == "timber":
+            lines.append(
+                "- heuristic update: nearby timber destruction is used as a plausible retrospective cause, "
+                "but this attribution is inferred from proximity/state similarity rather than from executable provenance."
+            )
+        elif latest["target_layer"] == "route":
+            lines.append(
+                "- heuristic update: a severed corridor is used as a plausible retrospective cause for fort and battlefield "
+                "degradation, but the explanation is still inferred from narrative coherence rather than typed dependency edges."
+            )
         lines.append(
             f"- observed event summary: {latest['type']} at {latest['origin']} magnitude={latest['magnitude']:.2f}"
         )
 
-    if world.compaction_archives:
-        archive = world.compaction_archives[-1]
-        lines.append(
-            f"- compacted regional summary: {archive['summary']}"
-        )
-        lines.append(
-            "- compaction retained only a coarse summary; no typed dependency edge or entity-specific causal archive survives."
-        )
+    for archive in reversed(world.compaction_archives):
+        if entity.id in archive["affected_entities"]:
+            lines.append(f"- compacted regional summary: {archive['summary']}")
+            lines.append(
+                "- compaction retained only a coarse summary; no typed dependency edge or entity-specific causal archive survives."
+            )
+            break
     return "\n".join(lines)
 
 
@@ -246,6 +391,46 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
     )
 
 
+def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    worldline = generate_world(seed=seed, size=size)
+    _, _, worldline_battlefield_id = find_route_conflict_triplet(worldline)
+    inject_route_cut(worldline, magnitude=0.75, t=120)
+    compact_route_cut(worldline, t=160)
+    worldline_explanation = explain_entity(worldline, worldline_battlefield_id)
+
+    control = generate_control_c(seed=seed, size=size)
+    control_triplet = find_control_route_conflict_triplet(control)
+    inject_control_route_cut(control, magnitude=0.75, t=120)
+    compact_control_route_cut(control, t=160)
+    control_explanation = explain_control_entity(control, control_triplet.battlefield_id)
+
+    return NegativeControlComparison(
+        worldline_post_perturbation_valid=_worldline_route_cut_post_perturbation_valid(worldline_explanation),
+        control_post_perturbation_valid=_control_route_cut_post_perturbation_valid(control_explanation),
+        worldline_compaction_retention_valid=_worldline_route_cut_compaction_retention_valid(worldline_explanation),
+        control_compaction_retention_valid=_control_route_cut_compaction_retention_valid(control_explanation),
+        worldline_contradiction_count=_count_worldline_route_cut_contradictions(worldline_explanation),
+        control_contradiction_count=_count_control_route_cut_contradictions(control, control_triplet.battlefield_id, control_explanation),
+        worldline_explanation_depth=_explanation_depth(worldline_explanation),
+        control_explanation_depth=_explanation_depth(control_explanation),
+    )
+
+
+def _control_entity_is_relevant_to_perturbation(entity: ControlEntity, perturbation: dict[str, object]) -> bool:
+    if perturbation["target_layer"] == "timber":
+        return entity.id in {perturbation.get("settlement_id"), perturbation.get("lumber_camp_id")}
+    if perturbation["target_layer"] == "route":
+        return entity.id in {perturbation.get("road_id"), perturbation.get("fort_id"), perturbation.get("battlefield_id")}
+    return False
+
+
+def _latest_control_perturbation(world: ControlWorld, *, target_layer: str) -> dict[str, object]:
+    for perturbation in reversed(world.perturbations):
+        if perturbation["target_layer"] == target_layer:
+            return perturbation
+    raise RuntimeError(f"control world has no {target_layer} perturbation to compact")
+
+
 def _worldline_post_perturbation_valid(explanation: str) -> bool:
     return "timber destruction" in explanation and "DAMAGES" in explanation
 
@@ -267,6 +452,27 @@ def _control_compaction_retention_valid(explanation: str) -> bool:
     return has_archive_node and has_entity_specific_retention
 
 
+def _worldline_route_cut_post_perturbation_valid(explanation: str) -> bool:
+    return "route cut" in explanation and "DAMAGES" in explanation and "Road_" in explanation
+
+
+def _worldline_route_cut_compaction_retention_valid(explanation: str) -> bool:
+    return "CompactionArchiveEvent" in explanation and "route cut archive" in explanation
+
+
+def _control_route_cut_post_perturbation_valid(explanation: str) -> bool:
+    has_event_reference = "RouteCut" in explanation or "route" in explanation
+    has_executable_causal_link = "TRANSITS" in explanation or "DAMAGES" in explanation
+    is_explicitly_heuristic = "heuristic update" in explanation or "narrative coherence" in explanation
+    return has_event_reference and has_executable_causal_link and not is_explicitly_heuristic
+
+
+def _control_route_cut_compaction_retention_valid(explanation: str) -> bool:
+    has_archive_node = "CompactionArchiveEvent" in explanation
+    has_entity_specific_retention = "typed dependency edge" in explanation and "entity-specific causal archive" not in explanation
+    return has_archive_node and has_entity_specific_retention
+
+
 def _count_worldline_contradictions(explanation: str) -> int:
     contradictions = 0
     if "status=Poor" in explanation and "timber destruction" not in explanation:
@@ -284,6 +490,31 @@ def _count_control_contradictions(world: ControlWorld, entity_id: int, explanati
     if world.compaction_archives and "typed dependency edge" not in explanation:
         contradictions += 1
     if world.perturbations and "timber destruction" not in explanation:
+        contradictions += 1
+    if world.perturbations and "heuristic update" in explanation:
+        contradictions += 1
+    return contradictions
+
+
+def _count_worldline_route_cut_contradictions(explanation: str) -> int:
+    contradictions = 0
+    if "route cut" not in explanation:
+        contradictions += 1
+    if "CompactionArchiveEvent" not in explanation:
+        contradictions += 1
+    return contradictions
+
+
+def _count_control_route_cut_contradictions(world: ControlWorld, entity_id: int, explanation: str) -> int:
+    entity = world.entities[entity_id]
+    contradictions = 0
+    if entity.type == EntityType.BATTLEFIELD and "conflict corridors" in explanation:
+        contradictions += 1
+    if world.compaction_archives and "entity-specific causal archive" in explanation:
+        contradictions += 1
+    if world.compaction_archives and "typed dependency edge" not in explanation:
+        contradictions += 1
+    if world.perturbations and "RouteCut" not in explanation:
         contradictions += 1
     if world.perturbations and "heuristic update" in explanation:
         contradictions += 1
