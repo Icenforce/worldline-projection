@@ -107,4 +107,4 @@ Constraints:
 - Debug rendering must remain read-only and must not mutate world state, provenance, perturbations, or validation results.
 - Do not treat these overlays as game rendering, UI rendering, or a visual-layer architecture.
 
-The current prototype already covers the deterministic substrate, accountable placement for settlements/resources/roads/forts/ruins/battlefields, the timber-collapse perturbation path, and compaction retention checks. The next major milestone is the negative-control comparison required by the implementation contract.
+The current prototype already covers the deterministic substrate, accountable placement for settlements/resources/roads/forts/ruins/battlefields, the timber-collapse perturbation path, route-cut perturbation coverage, compaction retention checks, and the initial negative-control comparison against Control C. The main remaining contract gap is Gate 4 general compaction without amnesia beyond the demo-only archive path.
