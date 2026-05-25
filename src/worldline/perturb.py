@@ -86,6 +86,74 @@ def inject_timber_destruction(world: World, *, magnitude: float = 0.9, t: int = 
     return perturbation
 
 
+def find_route_conflict_triplet(world: World) -> tuple[int, int, int]:
+    """Return (road_id, fort_id, battlefield_id) for a battlefield anchored to a routed conflict."""
+
+    best: tuple[float, int, int, int] | None = None
+    for entity in world.entities.values():
+        if entity.type != EntityType.BATTLEFIELD:
+            continue
+
+        road_id: int | None = None
+        fort_id: int | None = None
+        conflict_score = 0.0
+        for edge, parent in world.provenance.parents_of(entity.root_provenance_id):
+            if edge.edge_type == EdgeType.ENABLES and parent.entity_id is not None:
+                parent_entity = world.entities[parent.entity_id]
+                if parent_entity.type == EntityType.ROAD:
+                    road_id = parent_entity.id
+                    conflict_score = max(conflict_score, edge.weight)
+            elif edge.edge_type == EdgeType.CAUSES:
+                fort_id = parent.payload.get("fort_entity")
+                conflict_score = max(conflict_score, edge.weight)
+
+        if road_id is None or fort_id is None:
+            continue
+
+        candidate = (conflict_score, road_id, fort_id, entity.id)
+        if best is None or candidate > best:
+            best = candidate
+
+    if best is None:
+        raise RuntimeError("no battlefield with accountable route conflict found")
+    return best[1], best[2], best[3]
+
+
+def inject_route_cut(world: World, *, magnitude: float = 0.75, t: int = 120) -> Perturbation:
+    """Damage a road-backed conflict corridor and propagate the loss through transit dependencies."""
+
+    road_id, fort_id, battlefield_id = find_route_conflict_triplet(world)
+    road = world.entities[road_id]
+    cut_index = len(road.coordinates) // 2
+    origin = road.coordinates[cut_index]
+
+    perturbation = Perturbation(
+        id=len(world.perturbations) + 1,
+        t=t,
+        type=PerturbationType.ROUTE_CUT,
+        origin=origin,
+        radius=0,
+        magnitude=magnitude,
+        target_layer="route",
+        target_entity_id=road_id,
+        payload={"road_id": road_id, "fort_id": fort_id, "battlefield_id": battlefield_id, "cut_index": cut_index},
+    )
+    world.perturbations[perturbation.id] = perturbation
+
+    perturb_node = world.provenance.add_node(
+        NodeType.PERTURBATION_EVENT,
+        f"route cut on {road.name}",
+        event_id=perturbation.id,
+        payload={"magnitude": magnitude, "target_layer": "route", "origin": origin, "road_entity": road_id},
+    )
+
+    _apply_direct_entity_damage(world, entity=road, perturbation=perturbation, perturb_node_id=perturb_node.id)
+    for impact in _propagate_damage(world, frontier=[(road.id, perturbation.magnitude)]):
+        _apply_propagated_damage(world, impact=impact)
+
+    return perturbation
+
+
 def _find_direct_resource_impacts(world: World, perturbation: Perturbation) -> list[Entity]:
     impacted: list[Entity] = []
     for entity in world.entities.values():
@@ -135,6 +203,36 @@ def _apply_direct_resource_damage(
         EdgeType.DAMAGES,
         weight=perturbation.magnitude,
         payload={
+            "target_layer": perturbation.target_layer,
+            "old_function": old_function,
+            "new_function": entity.state.function,
+            "old_integrity": old_integrity,
+            "new_integrity": entity.state.integrity,
+        },
+    )
+
+
+def _apply_direct_entity_damage(
+    world: World,
+    *,
+    entity: Entity,
+    perturbation: Perturbation,
+    perturb_node_id: int,
+) -> None:
+    old_function = entity.state.function
+    old_integrity = entity.state.integrity
+    entity.state.function = max(0.0, entity.state.function * (1.0 - perturbation.magnitude * 0.65))
+    entity.state.integrity = max(0.0, entity.state.integrity - perturbation.magnitude * 0.45)
+    entity.state.stale = True
+    entity.state.clamp()
+
+    world.provenance.add_edge(
+        perturb_node_id,
+        entity.root_provenance_id,
+        EdgeType.DAMAGES,
+        weight=perturbation.magnitude,
+        payload={
+            "target_entity": entity.id,
             "target_layer": perturbation.target_layer,
             "old_function": old_function,
             "new_function": entity.state.function,

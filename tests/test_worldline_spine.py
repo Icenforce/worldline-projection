@@ -3,6 +3,8 @@ from worldline.models import EdgeType, EntityType, NodeType
 from worldline.perturb import (
     compact_timber_collapse,
     find_timber_dependency_pair,
+    find_route_conflict_triplet,
+    inject_route_cut,
     inject_timber_destruction,
 )
 from worldline.query import explain_entity
@@ -82,3 +84,33 @@ def test_compaction_preserves_generated_dependency_explanation():
 
     results = run_validation(world)
     assert all(result.passed for result in results)
+
+
+def test_route_cut_degrades_conflict_corridor_and_explains_impact():
+    world = generate_world(seed=12345, size=128)
+    road_id, fort_id, battlefield_id = find_route_conflict_triplet(world)
+    road = world.entities[road_id]
+    fort = world.entities[fort_id]
+    battlefield = world.entities[battlefield_id]
+    before_road_function = road.state.function
+    before_fort_function = fort.state.function
+    before_battlefield_function = battlefield.state.function
+
+    inject_route_cut(world, magnitude=0.75, t=120)
+
+    assert road.state.function < before_road_function
+    assert fort.state.function < before_fort_function
+    assert battlefield.state.function < before_battlefield_function
+
+    road_damage_edges = [
+        edge
+        for edge in world.provenance.edges.values()
+        if edge.edge_type == EdgeType.DAMAGES
+        and edge.target_node_id == road.root_provenance_id
+        and world.provenance.nodes[edge.source_node_id].node_type == NodeType.PERTURBATION_EVENT
+    ]
+    assert road_damage_edges
+
+    explanation = explain_entity(world, battlefield_id)
+    assert "route cut" in explanation
+    assert road.name in explanation
