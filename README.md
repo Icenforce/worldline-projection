@@ -75,4 +75,36 @@ python demo_worldline.py --seed 12345 --size 128
 pytest
 ```
 
+## Latest diagnostic overlays
+
+These are diagnostic overlays, not the visual/game renderer.
+
+Latest committed debug renders:
+- [substrate](docs/debug/latest/substrate.png)
+- [resources](docs/debug/latest/resources.png)
+- [entities](docs/debug/latest/entities.png)
+- [causal chain](docs/debug/latest/causal_chain.png)
+
+Recommended local regeneration command:
+
+```bash
+python demo_worldline.py --seed 12345 --size 128 --debug-output-dir docs/debug/latest --debug-cell-size 4
+```
+
+Autonomous workflow policy for implementation passes:
+1. Start from a clean tree.
+2. Make one scoped implementation/test change set.
+3. Run `pytest`.
+4. Regenerate `docs/debug/latest/` with the command above.
+5. Check `git status`.
+6. If the PNGs changed for an understood world/render logic reason, commit them with the related code change.
+7. If the PNGs changed unexpectedly, explain the cause before proceeding.
+8. Do not continue unrelated work on a dirty tree.
+
+Constraints:
+- Keep only the latest PNG set in `docs/debug/latest/`.
+- Do not create timestamped render archives.
+- Debug rendering must remain read-only and must not mutate world state, provenance, perturbations, or validation results.
+- Do not treat these overlays as game rendering, UI rendering, or a visual-layer architecture.
+
 The current prototype already covers the deterministic substrate, accountable placement for settlements/resources/roads/forts/ruins/battlefields, the timber-collapse perturbation path, and compaction retention checks. The next major milestone is the negative-control comparison required by the implementation contract.
