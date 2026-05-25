@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | Post-perturbation causal validity | pass | fail |
 | Compaction retention validity | pass | fail |
+| Perturbation consequence rate | 1.00 | 1.00 |
 | Contradiction count | 0 | 2 |
 | Explanation depth | 24 | 5 |
 
@@ -17,6 +18,7 @@
 
 - Worldline preserves a perturbation-linked timber explanation through compaction.
 - Control C produces a plausible timber narrative, but it fails the causal-validity check after perturbation.
+- Perturbation consequence rate: Worldline=1.00, Control C=1.00.
 - Contradiction gap: Worldline=0, Control C=2.
 
 ## Route-Cut / Battlefield: Worldline vs Control C
@@ -25,6 +27,7 @@
 | --- | --- | --- |
 | Post-perturbation causal validity | pass | fail |
 | Compaction retention validity | pass | fail |
+| Perturbation consequence rate | 1.00 | 1.00 |
 | Contradiction count | 0 | 3 |
 | Explanation depth | 12 | 5 |
 
@@ -32,6 +35,7 @@
 
 - Worldline retains route-cut / battlefield consequences with executable provenance through compaction.
 - Control C can tell a coherent corridor-disruption story, but it still lacks executable dependency edges and retained entity-specific provenance.
+- Perturbation consequence rate: Worldline=1.00, Control C=1.00.
 - Contradiction gap: Worldline=0, Control C=3.
 
 ## Limitations
