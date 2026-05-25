@@ -31,7 +31,7 @@ def test_worldline_beats_control_c_after_perturbation_and_compaction():
     assert comparison.worldline_contradiction_count < comparison.control_contradiction_count
 
 
-def test_control_c_explanation_stays_stale_after_timber_perturbation_and_compaction():
+def test_control_c_updates_explanation_heuristically_but_still_fails_causal_validity():
     world = generate_control_c(seed=12345, size=128)
     pair = find_control_timber_dependency_pair(world)
 
@@ -40,6 +40,8 @@ def test_control_c_explanation_stays_stale_after_timber_perturbation_and_compact
     explanation = explain_control_entity(world, pair.settlement_id)
 
     assert "status=Poor" in explanation
-    assert "timber destruction" not in explanation
+    assert "timber destruction" in explanation
+    assert "heuristic update" in explanation
     assert "CompactionArchiveEvent" not in explanation
+    assert "typed dependency edge" in explanation
     assert "promises construction support" in explanation

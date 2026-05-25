@@ -199,8 +199,25 @@ def explain_control_entity(world: ControlWorld, entity_id: int) -> str:
         "posthoc_explanation:",
         f"- {entity.explanation_template}",
     ]
+
+    if world.perturbations and entity.supporting_resource == "timber":
+        latest = world.perturbations[-1]
+        lines.append(
+            "- heuristic update: nearby timber destruction is used as a plausible retrospective cause, "
+            "but this attribution is inferred from proximity/state similarity rather than from executable provenance."
+        )
+        lines.append(
+            f"- observed event summary: {latest['type']} at {latest['origin']} magnitude={latest['magnitude']:.2f}"
+        )
+
     if world.compaction_archives:
-        lines.append("- local state compacted into summary records")
+        archive = world.compaction_archives[-1]
+        lines.append(
+            f"- compacted regional summary: {archive['summary']}"
+        )
+        lines.append(
+            "- compaction retained only a coarse summary; no typed dependency edge or entity-specific causal archive survives."
+        )
     return "\n".join(lines)
 
 
@@ -238,11 +255,16 @@ def _worldline_compaction_retention_valid(explanation: str) -> bool:
 
 
 def _control_post_perturbation_valid(explanation: str) -> bool:
-    return "timber destruction" in explanation or "ResourceDestruction" in explanation
+    has_event_reference = "timber destruction" in explanation or "ResourceDestruction" in explanation
+    has_executable_causal_link = "DAMAGES" in explanation or "SUPPLIES" in explanation
+    is_explicitly_heuristic = "heuristic update" in explanation or "retrospective cause" in explanation
+    return has_event_reference and has_executable_causal_link and not is_explicitly_heuristic
 
 
 def _control_compaction_retention_valid(explanation: str) -> bool:
-    return "timber collapse archive" in explanation or "CompactionArchiveEvent" in explanation
+    has_archive_node = "CompactionArchiveEvent" in explanation
+    has_entity_specific_retention = "dependency_loss" in explanation or "typed dependency edge" in explanation
+    return has_archive_node and has_entity_specific_retention
 
 
 def _count_worldline_contradictions(explanation: str) -> int:
@@ -259,9 +281,11 @@ def _count_control_contradictions(world: ControlWorld, entity_id: int, explanati
     contradictions = 0
     if entity.state.status_label == "Poor" and "promises construction support" in explanation:
         contradictions += 1
-    if world.compaction_archives and "timber collapse" not in explanation:
+    if world.compaction_archives and "typed dependency edge" not in explanation:
         contradictions += 1
     if world.perturbations and "timber destruction" not in explanation:
+        contradictions += 1
+    if world.perturbations and "heuristic update" in explanation:
         contradictions += 1
     return contradictions
 
