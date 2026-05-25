@@ -29,6 +29,7 @@ class PropagationImpact:
 class CompactedConsequenceBundle:
     archive_node_id: int
     patch_id: int
+    patch_ids: tuple[int, ...]
     source_perturbation_ids: tuple[int, ...]
     affected_entity_ids: tuple[int, ...]
 
@@ -351,8 +352,9 @@ def compact_perturbation_consequences(
     """Archive perturbation consequences without erasing causal explanation."""
 
     source_perturbations = _resolve_source_perturbations(world, perturbation_ids)
-    direct_damage_edges, all_damage_edges = _collect_damage_edges(world, source_perturbations)
-    if not direct_damage_edges:
+    perturbation_groups = _collect_damage_groups(world, source_perturbations)
+    all_damage_edges = _flatten_group_edges(perturbation_groups)
+    if not all_damage_edges:
         raise RuntimeError("no direct perturbation damage edges found for compaction")
 
     affected_entity_ids = _affected_entity_ids(world, all_damage_edges)
@@ -363,9 +365,11 @@ def compact_perturbation_consequences(
         "spatial_scope": _spatial_scope(source_perturbations),
         "source_perturbation_ids": [perturbation.id for perturbation in source_perturbations],
         "affected_entity_ids": affected_entity_ids,
+        "affected_entity_groups": _affected_entity_groups(world, perturbation_groups),
         "affected_entities": _affected_entities_payload(world, affected_entity_ids, all_damage_edges),
+        "source_groups": _source_groups_payload(world, source_perturbations, perturbation_groups, t=t),
         "typed_provenance_links": _typed_provenance_links(all_damage_edges),
-        "causal_sequence": _causal_sequence(world, source_perturbations, all_damage_edges, t=t),
+        "causal_sequence": _causal_sequence(world, source_perturbations, perturbation_groups, t=t),
     }
     archive_node = world.provenance.add_node(NodeType.COMPACTION_ARCHIVE_EVENT, archive_label, payload=archive_payload)
 
@@ -401,10 +405,11 @@ def compact_perturbation_consequences(
             },
         )
 
-    patch_id = _create_compaction_patch(world, source_perturbations, archive_node.id, t=t)
+    patch_ids = _create_compaction_patches(world, source_perturbations, archive_node.id, t=t)
     return CompactedConsequenceBundle(
         archive_node_id=archive_node.id,
-        patch_id=patch_id,
+        patch_id=patch_ids[0],
+        patch_ids=tuple(patch_ids),
         source_perturbation_ids=tuple(perturbation.id for perturbation in source_perturbations),
         affected_entity_ids=tuple(affected_entity_ids),
     )
@@ -438,37 +443,54 @@ def _resolve_source_perturbations(world: World, perturbation_ids: list[int] | No
     return perturbations
 
 
-def _collect_damage_edges(
+def _collect_damage_groups(
     world: World,
     source_perturbations: list[Perturbation],
-) -> tuple[list, list]:
+) -> dict[int, list]:
     perturbation_event_node_ids = {
-        node.id
+        node.event_id: node.id
         for node in world.provenance.nodes.values()
         if node.node_type == NodeType.PERTURBATION_EVENT and node.event_id in {perturbation.id for perturbation in source_perturbations}
     }
-    direct_damage_edges = [
-        edge
-        for edge in world.provenance.edges.values()
-        if edge.edge_type == EdgeType.DAMAGES and edge.source_node_id in perturbation_event_node_ids
-    ]
+    groups: dict[int, list] = {}
+    for perturbation in source_perturbations:
+        perturbation_event_node_id = perturbation_event_node_ids.get(perturbation.id)
+        if perturbation_event_node_id is None:
+            continue
+        direct_damage_edges = [
+            edge
+            for edge in world.provenance.edges.values()
+            if edge.edge_type == EdgeType.DAMAGES and edge.source_node_id == perturbation_event_node_id
+        ]
+        all_damage_edges = list(direct_damage_edges)
+        queue = [edge.target_node_id for edge in direct_damage_edges]
+        seen_targets = set(queue)
+        seen_edges = {edge.id for edge in direct_damage_edges}
+        while queue:
+            source_node_id = queue.pop(0)
+            for edge in world.provenance.edges.values():
+                if edge.edge_type != EdgeType.DAMAGES or edge.source_node_id != source_node_id:
+                    continue
+                if edge.id not in seen_edges:
+                    seen_edges.add(edge.id)
+                    all_damage_edges.append(edge)
+                if edge.target_node_id not in seen_targets:
+                    seen_targets.add(edge.target_node_id)
+                    queue.append(edge.target_node_id)
+        groups[perturbation.id] = all_damage_edges
+    return groups
 
-    all_damage_edges = list(direct_damage_edges)
-    queue = [edge.target_node_id for edge in direct_damage_edges]
-    seen_targets = set(queue)
-    seen_edges = {edge.id for edge in direct_damage_edges}
-    while queue:
-        source_node_id = queue.pop(0)
-        for edge in world.provenance.edges.values():
-            if edge.edge_type != EdgeType.DAMAGES or edge.source_node_id != source_node_id:
+
+def _flatten_group_edges(perturbation_groups: dict[int, list]) -> list:
+    all_edges: list = []
+    seen_edge_ids: set[int] = set()
+    for edges in perturbation_groups.values():
+        for edge in edges:
+            if edge.id in seen_edge_ids:
                 continue
-            if edge.id not in seen_edges:
-                seen_edges.add(edge.id)
-                all_damage_edges.append(edge)
-            if edge.target_node_id not in seen_targets:
-                seen_targets.add(edge.target_node_id)
-                queue.append(edge.target_node_id)
-    return direct_damage_edges, all_damage_edges
+            seen_edge_ids.add(edge.id)
+            all_edges.append(edge)
+    return all_edges
 
 
 def _affected_entity_ids(world: World, damage_edges: list) -> list[int]:
@@ -542,53 +564,114 @@ def _affected_entities_payload(world: World, affected_entity_ids: list[int], dam
     return payload
 
 
-def _typed_provenance_links(damage_edges: list) -> list[dict]:
+def _typed_provenance_links(damage_edges: list, *, perturbation_id: int | None = None) -> list[dict]:
     links: list[dict] = []
     for edge in damage_edges:
-        links.append(
-            {
-                "source_node_id": edge.source_node_id,
-                "target_node_id": edge.target_node_id,
-                "edge_type": str(edge.edge_type),
-                "weight": edge.weight,
-                "payload": dict(edge.payload),
-            }
-        )
+        link = {
+            "source_node_id": edge.source_node_id,
+            "target_node_id": edge.target_node_id,
+            "edge_type": str(edge.edge_type),
+            "weight": edge.weight,
+            "payload": dict(edge.payload),
+        }
+        if perturbation_id is not None:
+            link["source_perturbation_id"] = perturbation_id
+        links.append(link)
     return links
 
 
-def _causal_sequence(world: World, source_perturbations: list[Perturbation], damage_edges: list, *, t: int) -> list[list]:
+def _affected_entity_groups(world: World, perturbation_groups: dict[int, list]) -> dict[str, list[int]]:
+    return {
+        str(perturbation_id): _affected_entity_ids(world, edges)
+        for perturbation_id, edges in perturbation_groups.items()
+    }
+
+
+def _source_groups_payload(
+    world: World,
+    source_perturbations: list[Perturbation],
+    perturbation_groups: dict[int, list],
+    *,
+    t: int,
+) -> list[dict]:
+    payload: list[dict] = []
+    for perturbation in sorted(source_perturbations, key=lambda item: item.t):
+        group_edges = perturbation_groups.get(perturbation.id, [])
+        affected_ids = _affected_entity_ids(world, group_edges)
+        payload.append(
+            {
+                "source_perturbation_id": perturbation.id,
+                "event_type": str(perturbation.type),
+                "target_layer": perturbation.target_layer,
+                "origin": perturbation.origin,
+                "affected_entity_ids": affected_ids,
+                "affected_entities": _affected_entities_payload(world, affected_ids, group_edges),
+                "typed_provenance_links": _typed_provenance_links(group_edges, perturbation_id=perturbation.id),
+                "causal_sequence": _causal_sequence(world, [perturbation], {perturbation.id: group_edges}, t=t),
+            }
+        )
+    return payload
+
+
+def _causal_sequence(
+    world: World,
+    source_perturbations: list[Perturbation],
+    perturbation_groups: dict[int, list],
+    *,
+    t: int,
+) -> list[list]:
     sequence: list[list] = []
     for perturbation in sorted(source_perturbations, key=lambda item: item.t):
-        sequence.append([perturbation.t, str(perturbation.type), f"{perturbation.target_layer} damaged at {perturbation.origin}"])
-    for edge in damage_edges:
-        target = world.provenance.nodes[edge.target_node_id]
-        if target.entity_id is None:
-            continue
-        entity = world.entities[target.entity_id]
-        propagated_via = edge.payload.get("propagated_via", EdgeType.DAMAGES)
-        sequence.append([t, str(propagated_via), f"{entity.name} changed under {propagated_via}"])
+        sequence.append(
+            [
+                perturbation.t,
+                str(perturbation.type),
+                perturbation.id,
+                f"{perturbation.target_layer} damaged at {perturbation.origin}",
+            ]
+        )
+        for edge in perturbation_groups.get(perturbation.id, []):
+            target = world.provenance.nodes[edge.target_node_id]
+            if target.entity_id is None:
+                continue
+            entity = world.entities[target.entity_id]
+            propagated_via = edge.payload.get("propagated_via", EdgeType.DAMAGES)
+            sequence.append(
+                [
+                    t,
+                    str(propagated_via),
+                    perturbation.id,
+                    f"{entity.name} changed under {propagated_via}",
+                ]
+            )
     return sequence
 
 
-def _create_compaction_patch(world: World, source_perturbations: list[Perturbation], archive_node_id: int, *, t: int) -> int:
-    patch_id = len(world.patches) + 1
-    tile_overrides: dict[tuple[int, int], PatchTileDelta] = {}
+def _create_compaction_patches(
+    world: World,
+    source_perturbations: list[Perturbation],
+    archive_node_id: int,
+    *,
+    t: int,
+) -> list[int]:
+    patch_ids: list[int] = []
     for perturbation in source_perturbations:
+        patch_id = len(world.patches) + 1
         if perturbation.target_layer == "timber":
-            tile_overrides[perturbation.origin] = PatchTileDelta(timber_delta=-perturbation.magnitude)
+            tile_overrides = {perturbation.origin: PatchTileDelta(timber_delta=-perturbation.magnitude)}
         elif perturbation.target_layer == "iron":
-            tile_overrides[perturbation.origin] = PatchTileDelta(iron_delta=-perturbation.magnitude)
+            tile_overrides = {perturbation.origin: PatchTileDelta(iron_delta=-perturbation.magnitude)}
         elif perturbation.target_layer == "coal":
-            tile_overrides[perturbation.origin] = PatchTileDelta(coal_delta=-perturbation.magnitude)
+            tile_overrides = {perturbation.origin: PatchTileDelta(coal_delta=-perturbation.magnitude)}
         else:
-            tile_overrides[perturbation.origin] = PatchTileDelta()
+            tile_overrides = {perturbation.origin: PatchTileDelta()}
 
-    world.patches[patch_id] = LocalBaselinePatch(
-        id=patch_id,
-        region_id=_spatial_scope(source_perturbations),
-        created_at_t=t,
-        tile_overrides=tile_overrides,
-        archive_event_ids=[archive_node_id],
-    )
-    return patch_id
+        world.patches[patch_id] = LocalBaselinePatch(
+            id=patch_id,
+            region_id=_spatial_scope([perturbation]),
+            created_at_t=t,
+            tile_overrides=tile_overrides,
+            archive_event_ids=[archive_node_id],
+        )
+        patch_ids.append(patch_id)
+    return patch_ids

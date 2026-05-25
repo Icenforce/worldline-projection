@@ -141,5 +141,48 @@ def test_route_cut_compaction_preserves_conflict_explanation_and_bundle():
     assert archive_node.payload["typed_provenance_links"]
     assert archive_node.payload["affected_entities"][str(battlefield_id)]["state_deltas"]
 
-    patch = next(patch for patch in world.patches.values() if patch.archive_event_ids == [archive_id])
-    assert patch.tile_overrides
+    patches = [patch for patch in world.patches.values() if patch.archive_event_ids == [archive_id]]
+    assert len(patches) == 1
+    assert patches[0].tile_overrides
+
+
+def test_composite_compaction_preserves_distinct_timber_and_route_cut_groups():
+    world = generate_world(seed=12345, size=128)
+    settlement_id, lumber_id = find_timber_dependency_pair(world)
+    road_id, fort_id, battlefield_id = find_route_conflict_triplet(world)
+
+    timber = inject_timber_destruction(world, magnitude=0.9, t=100)
+    route_cut = inject_route_cut(world, magnitude=0.75, t=120)
+    bundle = compact_perturbation_consequences(world, perturbation_ids=[timber.id, route_cut.id], t=180)
+
+    archive_node = world.provenance.nodes[bundle.archive_node_id]
+    payload = archive_node.payload
+    assert payload["event_type"] == "CompositeConsequenceBundle"
+    assert payload["source_perturbation_ids"] == [timber.id, route_cut.id]
+
+    assert payload["affected_entity_groups"][str(timber.id)]
+    assert payload["affected_entity_groups"][str(route_cut.id)]
+    assert settlement_id in payload["affected_entity_groups"][str(timber.id)]
+    assert lumber_id in payload["affected_entity_groups"][str(timber.id)]
+    assert road_id in payload["affected_entity_groups"][str(route_cut.id)]
+    assert fort_id in payload["affected_entity_groups"][str(route_cut.id)]
+    assert battlefield_id in payload["affected_entity_groups"][str(route_cut.id)]
+
+    source_groups = {group["source_perturbation_id"]: group for group in payload["source_groups"]}
+    assert set(source_groups) == {timber.id, route_cut.id}
+    assert source_groups[timber.id]["target_layer"] == "timber"
+    assert source_groups[route_cut.id]["target_layer"] == "route"
+    assert source_groups[timber.id]["affected_entities"][str(settlement_id)]["state_deltas"]
+    assert source_groups[route_cut.id]["affected_entities"][str(battlefield_id)]["state_deltas"]
+    assert all(link["source_perturbation_id"] == timber.id for link in source_groups[timber.id]["typed_provenance_links"])
+    assert all(link["source_perturbation_id"] == route_cut.id for link in source_groups[route_cut.id]["typed_provenance_links"])
+
+    causal_ids = {entry[2] for entry in payload["causal_sequence"]}
+    assert causal_ids == {timber.id, route_cut.id}
+    assert any("timber damaged" in entry[3] for entry in payload["causal_sequence"] if entry[2] == timber.id)
+    assert any("route damaged" in entry[3] for entry in payload["causal_sequence"] if entry[2] == route_cut.id)
+
+    assert len(bundle.patch_ids) == 2
+    patches = [world.patches[patch_id] for patch_id in bundle.patch_ids]
+    assert all(patch.archive_event_ids == [bundle.archive_node_id] for patch in patches)
+    assert len({patch.region_id for patch in patches}) == 2
