@@ -47,6 +47,8 @@ def place_core_entities(world: World, *, settlement_count: int = 5) -> None:
     - mines
     - roads connecting settlements to resource exploitation entities
     - forts placed on strategically meaningful road chokepoints
+    - battlefields anchored to routed conflict provenance
+    - ruins anchored to terrain pressure and abandonment provenance
     """
 
     settlement_candidates = find_settlement_candidates(world)
