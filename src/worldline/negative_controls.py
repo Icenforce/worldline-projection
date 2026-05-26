@@ -8,6 +8,7 @@ through perturbation and compaction.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from worldline.generate import generate_world
@@ -35,7 +36,7 @@ class ControlEntity:
     name: str
     coordinates: list[Coord]
     state: EntityState
-    explanation_template: str
+    explanation_template: str | None
     supporting_resource: str | None = None
     supporting_coord: Coord | None = None
     supporting_entity_id: int | None = None
@@ -44,6 +45,7 @@ class ControlEntity:
 
 @dataclass
 class ControlWorld:
+    control_label: str
     seed: int
     size: int
     baseline: dict[Coord, BaselineTile]
@@ -79,9 +81,168 @@ class ControlRouteConflictTriplet:
     battlefield_id: int
 
 
+def generate_control_a(seed: int = 12345, size: int = 128, *, settlement_count: int = 5) -> ControlWorld:
+    baseline = generate_substrate(seed=seed, size=size)
+    world = ControlWorld(control_label="A", seed=seed, size=size, baseline=baseline)
+    rng = random.Random(seed)
+    coords = list(baseline.keys())
+    chosen = rng.sample(coords, settlement_count * 2 + 3)
+
+    next_entity_id = 1
+    for index in range(settlement_count):
+        settlement_coord = chosen[index * 2]
+        lumber_coord = chosen[index * 2 + 1]
+        settlement = ControlEntity(
+            id=next_entity_id,
+            type=EntityType.SETTLEMENT,
+            subtype="random",
+            name=f"ControlASettlement_{index + 1:02d}",
+            coordinates=[settlement_coord],
+            state=EntityState(integrity=1.0, wealth=0.45, function=1.0, active=True),
+            explanation_template=None,
+            supporting_entity_id=next_entity_id + 1,
+            notes={"random_coord": settlement_coord},
+        )
+        settlement.state.clamp()
+        world.entities[settlement.id] = settlement
+
+        lumber = ControlEntity(
+            id=next_entity_id + 1,
+            type=EntityType.LUMBER_CAMP,
+            subtype=None,
+            name=f"ControlALumberCamp_{index + 1:02d}",
+            coordinates=[lumber_coord],
+            state=EntityState(integrity=1.0, wealth=0.2, function=0.35, active=True),
+            explanation_template=None,
+            supporting_entity_id=settlement.id,
+            notes={"random_coord": lumber_coord},
+        )
+        lumber.state.clamp()
+        world.entities[lumber.id] = lumber
+        next_entity_id += 2
+
+    road_coord, fort_coord, battlefield_coord = chosen[-3:]
+    road = ControlEntity(
+        id=next_entity_id,
+        type=EntityType.ROAD,
+        subtype="random",
+        name=f"ControlARoad_{next_entity_id:02d}",
+        coordinates=[road_coord],
+        state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True, status_label="Stable"),
+        explanation_template=None,
+        notes={"random_coord": road_coord},
+    )
+    road.state.clamp()
+    world.entities[road.id] = road
+
+    fort = ControlEntity(
+        id=next_entity_id + 1,
+        type=EntityType.FORT,
+        subtype="random",
+        name=f"ControlAFort_{next_entity_id + 1:02d}",
+        coordinates=[fort_coord],
+        state=EntityState(integrity=1.0, wealth=0.3, function=1.0, active=True),
+        explanation_template=None,
+        supporting_entity_id=road.id,
+        notes={"random_coord": fort_coord},
+    )
+    fort.state.clamp()
+    world.entities[fort.id] = fort
+
+    battlefield = ControlEntity(
+        id=next_entity_id + 2,
+        type=EntityType.BATTLEFIELD,
+        subtype="random",
+        name=f"ControlABattlefield_{next_entity_id + 2:02d}",
+        coordinates=[battlefield_coord],
+        state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True),
+        explanation_template=None,
+        supporting_entity_id=road.id,
+        notes={"fort_entity_id": fort.id, "random_coord": battlefield_coord},
+    )
+    battlefield.state.clamp()
+    world.entities[battlefield.id] = battlefield
+    return world
+
+
+def generate_control_b(seed: int = 12345, size: int = 128, *, settlement_count: int = 5) -> ControlWorld:
+    baseline = generate_substrate(seed=seed, size=size)
+    world = ControlWorld(control_label="B", seed=seed, size=size, baseline=baseline)
+
+    settlement_candidates = find_settlement_candidates(_PlacementWorldView(baseline=baseline, size=size))
+    chosen = choose_spread_candidates(
+        settlement_candidates,
+        count=settlement_count,
+        min_distance=max(8, size // 10),
+    )
+    if not chosen:
+        raise RuntimeError("control generator found no coherent settlement candidates")
+
+    next_entity_id = 1
+    for index, candidate in enumerate(chosen, start=1):
+        tile = baseline[candidate.coord]
+        lumber_candidate = best_resource_candidate_near(
+            _PlacementWorldView(baseline=baseline, size=size),
+            candidate.coord,
+            resource="timber",
+            max_distance=max(12, size // 8),
+        )
+        settlement = ControlEntity(
+            id=next_entity_id,
+            type=EntityType.SETTLEMENT,
+            subtype=candidate.subtype,
+            name=f"ControlBSettlement_{index:02d}",
+            coordinates=[candidate.coord],
+            state=EntityState(
+                integrity=1.0,
+                wealth=min(0.9, 0.35 + candidate.score * 0.45),
+                function=1.0,
+                active=True,
+            ),
+            explanation_template=None,
+            supporting_resource="timber" if lumber_candidate is not None else None,
+            supporting_coord=lumber_candidate.coord if lumber_candidate is not None else None,
+            notes={
+                "placement_reason": (
+                    f"heuristic siting at {candidate.coord} with fertility={tile.fertility:.2f}, "
+                    f"water_flow={tile.water_flow:.2f}, slope={tile.slope:.2f}"
+                )
+            },
+        )
+        settlement.state.clamp()
+        world.entities[settlement.id] = settlement
+        next_entity_id += 1
+
+        if lumber_candidate is not None and lumber_candidate.value > 0.25:
+            lumber = ControlEntity(
+                id=next_entity_id,
+                type=EntityType.LUMBER_CAMP,
+                subtype=None,
+                name=f"ControlBLumberCamp_{next_entity_id:02d}",
+                coordinates=[lumber_candidate.coord],
+                state=EntityState(integrity=1.0, wealth=0.5, function=max(0.1, lumber_candidate.value), active=True),
+                explanation_template=None,
+                supporting_resource="timber",
+                supporting_coord=lumber_candidate.coord,
+                supporting_entity_id=settlement.id,
+                notes={
+                    "placement_reason": (
+                        f"heuristic timber siting at {lumber_candidate.coord} with local_timber={lumber_candidate.value:.2f}"
+                    )
+                },
+            )
+            lumber.state.clamp()
+            world.entities[lumber.id] = lumber
+            settlement.supporting_entity_id = lumber.id
+            next_entity_id += 1
+
+    _add_control_route_conflict(world, next_entity_id=next_entity_id)
+    return world
+
+
 def generate_control_c(seed: int = 12345, size: int = 128, *, settlement_count: int = 5) -> ControlWorld:
     baseline = generate_substrate(seed=seed, size=size)
-    world = ControlWorld(seed=seed, size=size, baseline=baseline)
+    world = ControlWorld(control_label="C", seed=seed, size=size, baseline=baseline)
 
     settlement_candidates = find_settlement_candidates(_PlacementWorldView(baseline=baseline, size=size))
     chosen = choose_spread_candidates(
@@ -161,14 +322,19 @@ def _add_control_route_conflict(world: ControlWorld, *, next_entity_id: int) -> 
         id=next_entity_id,
         type=EntityType.ROAD,
         subtype=road.subtype,
-        name=f"ControlRoad_{next_entity_id:02d}",
+        name=f"Control{world.control_label}Road_{next_entity_id:02d}",
         coordinates=list(road.coordinates),
         state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True, status_label="Stable"),
         explanation_template=(
             f"Road corridor inferred along {len(road.coordinates)} cells because it plausibly connects a strategic choke "
             f"between settlements and resource traffic."
-        ),
-        notes={"heuristic_role": "route_corridor"},
+        )
+        if world.control_label == "C"
+        else None,
+        notes={
+            "heuristic_role": "route_corridor",
+            "placement_reason": f"corridor heuristic using {len(road.coordinates)} aligned cells",
+        },
     )
     control_road.state.clamp()
     world.entities[control_road.id] = control_road
@@ -177,15 +343,20 @@ def _add_control_route_conflict(world: ControlWorld, *, next_entity_id: int) -> 
         id=next_entity_id + 1,
         type=EntityType.FORT,
         subtype=fort.subtype,
-        name=f"ControlFort_{next_entity_id + 1:02d}",
+        name=f"Control{world.control_label}Fort_{next_entity_id + 1:02d}",
         coordinates=list(fort.coordinates),
         state=EntityState(integrity=1.0, wealth=0.4, function=1.0, active=True),
         explanation_template=(
             f"Fort inferred at {fort.coordinates[0]} because a road chokepoint and route-control intuition make the "
             f"location defensible."
-        ),
+        )
+        if world.control_label == "C"
+        else None,
         supporting_entity_id=control_road.id,
-        notes={"heuristic_role": "route_control"},
+        notes={
+            "heuristic_role": "route_control",
+            "placement_reason": f"fort heuristic at chokepoint {fort.coordinates[0]}",
+        },
     )
     control_fort.state.clamp()
     world.entities[control_fort.id] = control_fort
@@ -194,15 +365,21 @@ def _add_control_route_conflict(world: ControlWorld, *, next_entity_id: int) -> 
         id=next_entity_id + 2,
         type=EntityType.BATTLEFIELD,
         subtype=battlefield.subtype,
-        name=f"ControlBattlefield_{next_entity_id + 2:02d}",
+        name=f"Control{world.control_label}Battlefield_{next_entity_id + 2:02d}",
         coordinates=list(battlefield.coordinates),
         state=EntityState(integrity=1.0, wealth=0.0, function=1.0, active=True),
         explanation_template=(
             f"Battlefield inferred near {battlefield.coordinates[0]} because forts and roads often imply conflict corridors "
             f"in post-hoc historical reconstruction."
-        ),
+        )
+        if world.control_label == "C"
+        else None,
         supporting_entity_id=control_road.id,
-        notes={"fort_entity_id": control_fort.id, "heuristic_role": "conflict_corridor"},
+        notes={
+            "fort_entity_id": control_fort.id,
+            "heuristic_role": "conflict_corridor",
+            "placement_reason": f"battlefield heuristic near corridor cell {battlefield.coordinates[0]}",
+        },
     )
     control_battlefield.state.clamp()
     world.entities[control_battlefield.id] = control_battlefield
@@ -338,13 +515,30 @@ def explain_control_entity(world: ControlWorld, entity_id: int) -> str:
     lines = [
         f"{entity.name} [{entity.type}]",
         f"status={entity.state.status_label} wealth={entity.state.wealth:.2f} function={entity.state.function:.2f}",
-        "posthoc_explanation:",
-        f"- {entity.explanation_template}",
     ]
+
+    if world.control_label == "C":
+        lines.extend([
+            "posthoc_explanation:",
+            f"- {entity.explanation_template}",
+        ])
+    elif world.control_label == "B":
+        lines.extend([
+            "heuristic_summary:",
+            f"- {entity.notes['placement_reason']}",
+            "- spatial coherence only; no executable provenance edges are stored.",
+        ])
+    else:
+        lines.extend([
+            "random_summary:",
+            f"- random uncoupled placement at {entity.coordinates[0]} with no coherent dependency record.",
+        ])
 
     latest = world.perturbations[-1] if world.perturbations else None
     if latest is not None and _control_entity_is_relevant_to_perturbation(entity, latest):
-        if latest["target_layer"] == "timber":
+        if world.control_label == "A":
+            lines.append(f"- event note: {latest['type']} touched this random baseline at {latest['origin']}.")
+        elif latest["target_layer"] == "timber":
             lines.append(
                 "- heuristic update: nearby timber destruction is used as a plausible retrospective cause, "
                 "but this attribution is inferred from proximity/state similarity rather than from executable provenance."
@@ -360,15 +554,35 @@ def explain_control_entity(world: ControlWorld, entity_id: int) -> str:
 
     for archive in reversed(world.compaction_archives):
         if entity.id in archive["affected_entities"]:
-            lines.append(f"- compacted regional summary: {archive['summary']}")
-            lines.append(
-                "- compaction retained only a coarse summary; no typed dependency edge or entity-specific causal archive survives."
-            )
+            if world.control_label == "A":
+                lines.append(f"- compacted note: {archive['summary']}")
+            else:
+                lines.append(f"- compacted regional summary: {archive['summary']}")
+                lines.append(
+                    "- compaction retained only a coarse summary; no typed dependency edge or entity-specific causal archive survives."
+                )
             break
     return "\n".join(lines)
 
 
+def compare_worldline_vs_control_a(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control(generate_control_a, seed=seed, size=size)
+
+
+def compare_worldline_vs_control_b(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control(generate_control_b, seed=seed, size=size)
+
+
 def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control(generate_control_c, seed=seed, size=size)
+
+
+def _compare_worldline_vs_control(
+    control_factory,
+    *,
+    seed: int = 12345,
+    size: int = 128,
+) -> NegativeControlComparison:
     worldline = generate_world(seed=seed, size=size)
     worldline_settlement_id, _ = find_timber_dependency_pair(worldline)
     worldline_before = _state_signature(worldline.entities[worldline_settlement_id].state)
@@ -376,7 +590,7 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
     compact_timber_collapse(worldline, t=142)
     worldline_explanation = explain_entity(worldline, worldline_settlement_id)
 
-    control = generate_control_c(seed=seed, size=size)
+    control = control_factory(seed=seed, size=size)
     control_pair = find_control_timber_dependency_pair(control)
     control_before = _state_signature(control.entities[control_pair.settlement_id].state)
     inject_control_timber_destruction(control, magnitude=0.9, t=100)
@@ -385,9 +599,9 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
 
     return NegativeControlComparison(
         worldline_post_perturbation_valid=_worldline_post_perturbation_valid(worldline_explanation),
-        control_post_perturbation_valid=_control_post_perturbation_valid(control_explanation),
+        control_post_perturbation_valid=_control_post_perturbation_valid(control, control_explanation),
         worldline_compaction_retention_valid=_worldline_compaction_retention_valid(worldline_explanation),
-        control_compaction_retention_valid=_control_compaction_retention_valid(control_explanation),
+        control_compaction_retention_valid=_control_compaction_retention_valid(control, control_explanation),
         worldline_perturbation_consequence_rate=_single_entity_consequence_rate(
             before=worldline_before,
             after=_state_signature(worldline.entities[worldline_settlement_id].state),
@@ -404,6 +618,23 @@ def compare_worldline_vs_control_c(seed: int = 12345, size: int = 128) -> Negati
 
 
 def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control_route_cut(generate_control_c, seed=seed, size=size)
+
+
+def compare_worldline_vs_control_a_route_cut(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control_route_cut(generate_control_a, seed=seed, size=size)
+
+
+def compare_worldline_vs_control_b_route_cut(seed: int = 12345, size: int = 128) -> NegativeControlComparison:
+    return _compare_worldline_vs_control_route_cut(generate_control_b, seed=seed, size=size)
+
+
+def _compare_worldline_vs_control_route_cut(
+    control_factory,
+    *,
+    seed: int = 12345,
+    size: int = 128,
+) -> NegativeControlComparison:
     worldline = generate_world(seed=seed, size=size)
     _, _, worldline_battlefield_id = find_route_conflict_triplet(worldline)
     worldline_before = _state_signature(worldline.entities[worldline_battlefield_id].state)
@@ -411,7 +642,7 @@ def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128)
     compact_route_cut(worldline, t=160)
     worldline_explanation = explain_entity(worldline, worldline_battlefield_id)
 
-    control = generate_control_c(seed=seed, size=size)
+    control = control_factory(seed=seed, size=size)
     control_triplet = find_control_route_conflict_triplet(control)
     control_before = _state_signature(control.entities[control_triplet.battlefield_id].state)
     inject_control_route_cut(control, magnitude=0.75, t=120)
@@ -420,9 +651,9 @@ def compare_worldline_vs_control_c_route_cut(seed: int = 12345, size: int = 128)
 
     return NegativeControlComparison(
         worldline_post_perturbation_valid=_worldline_route_cut_post_perturbation_valid(worldline_explanation),
-        control_post_perturbation_valid=_control_route_cut_post_perturbation_valid(control_explanation),
+        control_post_perturbation_valid=_control_route_cut_post_perturbation_valid(control, control_explanation),
         worldline_compaction_retention_valid=_worldline_route_cut_compaction_retention_valid(worldline_explanation),
-        control_compaction_retention_valid=_control_route_cut_compaction_retention_valid(control_explanation),
+        control_compaction_retention_valid=_control_route_cut_compaction_retention_valid(control, control_explanation),
         worldline_perturbation_consequence_rate=_single_entity_consequence_rate(
             before=worldline_before,
             after=_state_signature(worldline.entities[worldline_battlefield_id].state),
@@ -473,14 +704,18 @@ def _worldline_compaction_retention_valid(explanation: str) -> bool:
     return "CompactionArchiveEvent" in explanation and "timber collapse archive" in explanation
 
 
-def _control_post_perturbation_valid(explanation: str) -> bool:
+def _control_post_perturbation_valid(world: ControlWorld, explanation: str) -> bool:
+    if world.control_label in {"A", "B"}:
+        return False
     has_event_reference = "timber destruction" in explanation or "ResourceDestruction" in explanation
     has_executable_causal_link = "DAMAGES" in explanation or "SUPPLIES" in explanation
     is_explicitly_heuristic = "heuristic update" in explanation or "retrospective cause" in explanation
     return has_event_reference and has_executable_causal_link and not is_explicitly_heuristic
 
 
-def _control_compaction_retention_valid(explanation: str) -> bool:
+def _control_compaction_retention_valid(world: ControlWorld, explanation: str) -> bool:
+    if world.control_label in {"A", "B", "C"}:
+        return False
     has_archive_node = "CompactionArchiveEvent" in explanation
     has_entity_specific_retention = "dependency_loss" in explanation or "typed dependency edge" in explanation
     return has_archive_node and has_entity_specific_retention
@@ -494,14 +729,18 @@ def _worldline_route_cut_compaction_retention_valid(explanation: str) -> bool:
     return "CompactionArchiveEvent" in explanation and "route cut archive" in explanation
 
 
-def _control_route_cut_post_perturbation_valid(explanation: str) -> bool:
+def _control_route_cut_post_perturbation_valid(world: ControlWorld, explanation: str) -> bool:
+    if world.control_label in {"A", "B"}:
+        return False
     has_event_reference = "RouteCut" in explanation or "route" in explanation
     has_executable_causal_link = "TRANSITS" in explanation or "DAMAGES" in explanation
     is_explicitly_heuristic = "heuristic update" in explanation or "narrative coherence" in explanation
     return has_event_reference and has_executable_causal_link and not is_explicitly_heuristic
 
 
-def _control_route_cut_compaction_retention_valid(explanation: str) -> bool:
+def _control_route_cut_compaction_retention_valid(world: ControlWorld, explanation: str) -> bool:
+    if world.control_label in {"A", "B", "C"}:
+        return False
     has_archive_node = "CompactionArchiveEvent" in explanation
     has_entity_specific_retention = "typed dependency edge" in explanation and "entity-specific causal archive" not in explanation
     return has_archive_node and has_entity_specific_retention
@@ -519,6 +758,14 @@ def _count_worldline_contradictions(explanation: str) -> int:
 def _count_control_contradictions(world: ControlWorld, entity_id: int, explanation: str) -> int:
     entity = world.entities[entity_id]
     contradictions = 0
+    if world.control_label == "A":
+        if "random uncoupled placement" in explanation:
+            contradictions += 1
+        if world.compaction_archives and "typed dependency edge" not in explanation:
+            contradictions += 1
+        if world.perturbations and "timber destruction" not in explanation and "ResourceDestruction" not in explanation:
+            contradictions += 1
+        return contradictions
     if entity.state.status_label == "Poor" and "promises construction support" in explanation:
         contradictions += 1
     if world.compaction_archives and "typed dependency edge" not in explanation:
@@ -542,6 +789,14 @@ def _count_worldline_route_cut_contradictions(explanation: str) -> int:
 def _count_control_route_cut_contradictions(world: ControlWorld, entity_id: int, explanation: str) -> int:
     entity = world.entities[entity_id]
     contradictions = 0
+    if world.control_label == "A":
+        if "random uncoupled placement" in explanation:
+            contradictions += 1
+        if world.compaction_archives and "typed dependency edge" not in explanation:
+            contradictions += 1
+        if world.perturbations and "RouteCut" not in explanation:
+            contradictions += 1
+        return contradictions
     if entity.type == EntityType.BATTLEFIELD and "conflict corridors" in explanation:
         contradictions += 1
     if world.compaction_archives and "entity-specific causal archive" in explanation:
