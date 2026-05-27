@@ -1,5 +1,6 @@
 from worldline.generate import generate_world
 from worldline.models import EdgeType, EntityType, NodeType
+from worldline.query import explain_entity
 from worldline.validate import validate_accountable_entity_placement
 
 
@@ -57,6 +58,17 @@ def test_battlefield_and_ruin_pass_accountable_placement_validation():
     result = validate_accountable_entity_placement(world)
 
     assert result.passed
+
+
+
+def test_ruin_query_explanation_mentions_terrain_and_abandonment():
+    world = generate_world(seed=12345, size=128)
+    ruin = next(entity for entity in world.entities.values() if entity.type == EntityType.RUIN)
+
+    explanation = explain_entity(world, ruin.id)
+
+    assert "marginal terrain" in explanation
+    assert "abandonment of precursor settlement" in explanation
 
 
 
